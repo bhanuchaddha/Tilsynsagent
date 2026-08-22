@@ -2,6 +2,11 @@
 
 *Tilsyn* is Danish for supervision or oversight.
 
+**Demo/example project.** Built to explain, concretely, how to develop and
+operate an AI agent for production use — the reliability layer, not just the
+agent — and to serve as reference material for that explanation. It is not a
+live regulatory tool.
+
 An agent that watches public Danish regulatory and municipal publications,
 detects what changed, decides whether each change matters against a written
 rule set, and then either files it with a structured summary or escalates it to
@@ -50,3 +55,15 @@ them.
 Docs describe what the system does and how its correctness is established, in
 plain language, for a reader who has not seen the code. State what is built and
 what is not.
+
+## Stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Orchestration | LangGraph 1.0 | `interrupt()` / `Command(resume=...)` / `PostgresSaver` for human-in-the-loop escalation - the same primitives production systems (e.g. Klarna's support agent) use. Considered and rejected Agno for a better raw feature match, but the framework choice has to be explained in every conversation this project exists to support. |
+| LLM | Groq, `openai/gpt-oss-120b`, behind `GROQ_MODEL` | Free tier: 1,000 requests/day, versus Gemini's ~20/day, which had shaped several compromises in the original plan. Strict structured output (JSON schema, `strict: true`) verified live before anything depended on it. |
+| Database | Postgres on Neon | The register is relational in substance even though the source is a flat WFS feed. Chosen over Supabase because Supabase pauses free projects after a week idle and requires a manual unpause; Neon auto-suspends but wakes on connection - required for a system meant to run unattended and be live on demand. |
+| Observability / evals | Langfuse Cloud (Phase 2+) | Free tier covers evals, datasets, and prompt versioning without self-hosting ClickHouse/Redis/S3. 30-day retention means anything that must outlive that gets committed into `docs/` at the moment it happens, not linked to. |
+
+See [`docs/architecture.md`](docs/architecture.md) for the code/LLM decision
+split and the full request flow.

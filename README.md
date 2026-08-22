@@ -2,6 +2,13 @@
 
 *Tilsyn* is Danish for supervision or oversight.
 
+**This is a demo/example project, not a production system.** It exists to
+show, concretely, what it takes to run an AI agent in production: an
+escalation path, a hand-labelled golden dataset, traced runs, evals gating CI,
+versioned prompts, and a rollback that has actually been executed — not just
+the agent itself. It is built and written up for that purpose; treat it as a
+worked example and reference architecture, not as a live regulatory tool.
+
 An agent that watches public Danish regulatory and municipal publications,
 detects what changed, decides whether each change matters against a written rule
 set, and then either files it with a structured summary or escalates it to a
@@ -101,22 +108,44 @@ been verified fetchable with a live call.
 
 ## Current state
 
-Nothing runs yet. This section gets updated as pieces land, and it describes what
-is actually working — not what is planned.
+This section describes what is actually working, not what is planned.
 
-- [ ] Rule set written, golden dataset labelled
-- [ ] Agent runs end to end, files or escalates unattended
+- [x] Rule set written ([`docs/rules.md`](docs/rules.md)), golden dataset labelled
+      ([`evals/golden/cases.jsonl`](evals/golden/cases.jsonl))
+- [x] Agent runs end to end, files or escalates unattended (LangGraph graph,
+      rule engine, LLM assess/summarise, Postgres-backed escalation via
+      `interrupt()`)
 - [ ] Runs traced, baseline eval score recorded
 - [ ] Evals gating CI
 - [ ] Prompt registry, rollback executed and timed
 - [ ] Public status page
 
+Phase 1 (the agent itself, deterministic rule engine, escalation path) is
+built and tested. Phase 2 (tracing, evals, CI gating) and Phase 3 (prompt
+registry, rollback) are not yet built — see
+[`docs/architecture.md`](docs/architecture.md) for what exists today and what
+is explicitly deferred.
+
 ## Running it
 
-Setup instructions land with the first working version.
+```bash
+uv sync
+cp .env.example .env   # fill in GROQ_API_KEY and DATABASE_URL at minimum
+uv run pytest          # unit + integration tests against mocks
+uv run tilsynsagent    # runs the agent end to end
+```
 
 Configuration is env-only — copy `.env.example` to `.env` and fill it in. No
 keys or connection strings are tracked in this repo.
+
+## Why this exists
+
+This project is a teaching artifact for how to build and reason about an AI
+agent meant to run unattended: what makes its decisions trustworthy, how to
+know when it's getting worse, and what to do when it hits a case nobody wrote
+a rule for. The domain (Danish municipal planning registers) was chosen
+because it has real public data and genuine ambiguity, not because the author
+has a stake in Danish planning law.
 
 ## Licence
 

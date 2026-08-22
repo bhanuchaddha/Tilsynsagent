@@ -1,0 +1,92 @@
+"""The assessment step: a Groq call invoked only when rules.engine.apply_rules
+returns NOT_COVERED.
+
+The model never decides what is compliant; it decides what is worth a
+person's attention, and explains why. It is given the change, the rule set's
+stated boundary (docs/rules.md, "What this rule set does not cover"), and the
+source document link, and returns what is unclear, what a person must decide,
+and a citation - never a file/escalate/ignore label. That label is not this
+step's job: apply_rules already returned NOT_COVERED, so the only outcome
+downstream is escalation. Making the model choose a label it cannot act on
+would just be inviting the "the model was wrong" disagreement class the
+project's decision architecture exists to avoid.
+"""
+
+from __future__ import annotations
+
+import os
+
+from groq import Groq
+from pydantic import BaseModel, Field
+
+from tilsynsagent.llm.schema import response_format
+from tilsynsagent.rules.loader import load_not_covered_section
+
+DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+
+SYSTEM_PROMPT = """\
+You assess changes to the Danish local-plan register (Plandata.dk) that the \
+written rule set does not cover. You do not decide whether the change is \
+compliant or what should be built. You decide what a person needs to look at, \
+and explain why the register alone cannot settle it.
+
+Ground every statement in the before/after values and the rule set boundary \
+given to you. Do not speculate about intent, and do not invent facts not in \
+the record. If the source document is not available to you, say so rather \
+than guessing its contents - you cite it, you do not read it."""
+
+
+class Assessment(BaseModel):
+    what_is_unclear: str = Field(
+        description="What specifically the register cannot settle about this change."
+    )
+    what_a_person_must_decide: str = Field(
+        description="The concrete question a person must resolve, in one sentence."
+    )
+    citation: str = Field(description="URL of the source document (doklink).")
+
+
+def build_prompt(*, sub_area_description: str, changed_fields: dict, doklink: str) -> str:
+    not_covered = load_not_covered_section()
+    return f"""\
+Sub-area: {sub_area_description}
+
+Changed fields (before -> after):
+{changed_fields}
+
+Source document: {doklink}
+
+The rule set's stated boundary - what it does not cover, and why the agent
+must escalate rather than guess here:
+
+{not_covered}
+
+State what is unclear about this specific change, what a person must decide,
+and cite the source document."""
+
+
+def assess(
+    *,
+    sub_area_description: str,
+    changed_fields: dict,
+    doklink: str,
+    client: Groq | None = None,
+    model: str = DEFAULT_MODEL,
+) -> Assessment:
+    """Calls Groq for a case the rule engine returned NOT_COVERED on."""
+    client = client or Groq(api_key=os.environ["GROQ_API_KEY"])
+    prompt = build_prompt(
+        sub_area_description=sub_area_description,
+        changed_fields=changed_fields,
+        doklink=doklink,
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        response_format=response_format(Assessment, "assessment"),
+        temperature=0,
+    )
+    return Assessment.model_validate_json(resp.choices[0].message.content)
