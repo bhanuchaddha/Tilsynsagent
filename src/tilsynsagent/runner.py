@@ -21,9 +21,12 @@ import psycopg
 from dotenv import load_dotenv
 from langgraph.types import Interrupt
 
+from tilsynsagent import obs
 from tilsynsagent.db import repo
 from tilsynsagent.db.migrate import run_migrations
 from tilsynsagent.graph import make_graph, run_input
+from tilsynsagent.llm.pricing import load_pricing
+from tilsynsagent.llm.usage import Usage
 from tilsynsagent.sources.plandata import PlandataClient, WatermarkStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,7 +48,17 @@ def run_once(database_url: str | None = None) -> dict:
 
     store = WatermarkStore(last_datoopdt=last_datoopdt, seen_at_watermark=set(seen_at_watermark))
 
-    counts = {"fetched": 0, "filed": 0, "escalated": 0, "ignored": 0, "errors": 0}
+    counts = {
+        "fetched": 0,
+        "filed": 0,
+        "escalated": 0,
+        "skipped": 0,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    pricing = load_pricing()
     graph, saver_cm = make_graph(database_url)
     try:
         graph.checkpointer.setup()
@@ -53,7 +66,9 @@ def run_once(database_url: str | None = None) -> dict:
             for record in store.fetch_new(client):
                 counts["fetched"] += 1
                 thread_id = _thread_id_for(record)
-                config = {"configurable": {"thread_id": thread_id}}
+                config = obs.trace_config(
+                    {"configurable": {"thread_id": thread_id}}, thread_id=thread_id
+                )
                 try:
                     result = graph.invoke(run_input(record), config=config)
                 except Exception:
@@ -62,6 +77,18 @@ def run_once(database_url: str | None = None) -> dict:
                     )
                     counts["errors"] += 1
                     continue
+
+                for usage_dict in result.get("usage", []) if isinstance(result, dict) else []:
+                    usage = Usage(
+                        model=usage_dict["model"],
+                        prompt_tokens=usage_dict["prompt_tokens"],
+                        completion_tokens=usage_dict["completion_tokens"],
+                        total_tokens=usage_dict["total_tokens"],
+                        latency_ms=usage_dict.get("latency_ms"),
+                    )
+                    counts["prompt_tokens"] += usage.prompt_tokens
+                    counts["completion_tokens"] += usage.completion_tokens
+                    counts["cost_usd"] += pricing.cost_usd(usage)
 
                 interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
                 if interrupts:
@@ -97,13 +124,21 @@ def run_once(database_url: str | None = None) -> dict:
                         outcome_result["diff_id"],
                     )
                 else:
-                    counts["ignored"] += 1
+                    # A first-ever sighting: deduplication, not a rule
+                    # outcome - see graph.py's _skip_node.
+                    counts["skipped"] += 1
 
         with psycopg.connect(database_url) as conn, conn.transaction():
             repo.save_watermark(conn, store.last_datoopdt, sorted(store.seen_at_watermark))
     finally:
+        # Mandatory before the process exits: this is a short-lived CLI and
+        # Langfuse batches spans - exiting without shutdown() can drop the
+        # tail of a run's trace. Must run before saver_cm.__exit__ closes the
+        # DB connection the checkpointer needs while flushing is happening.
+        obs.shutdown()
         saver_cm.__exit__(None, None, None)
 
+    counts["cost_usd"] = round(counts["cost_usd"], 6)
     logger.info("run complete: %s", counts)
     return counts
 

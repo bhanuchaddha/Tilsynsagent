@@ -19,9 +19,9 @@ def test_file_permission_refuses_escalate_outcome():
         check_outcome(FILE_PERMISSION, "escalate")
 
 
-def test_file_permission_refuses_ignore_outcome():
+def test_file_permission_refuses_not_covered_outcome():
     with pytest.raises(PermissionDenied):
-        check_outcome(FILE_PERMISSION, "ignore")
+        check_outcome(FILE_PERMISSION, "not_covered")
 
 
 def test_escalate_permission_allows_escalate_outcome():

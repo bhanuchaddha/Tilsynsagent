@@ -8,9 +8,10 @@ agent — and to serve as reference material for that explanation. It is not a
 live regulatory tool.
 
 An agent that watches public Danish regulatory and municipal publications,
-detects what changed, decides whether each change matters against a written
-rule set, and then either files it with a structured summary or escalates it to
-a human with its reasoning attached.
+detects what changed, and answers one question against a written rule set:
+does the reader now see something on land they care about that they could not
+see before? It then either files that with a structured summary or escalates
+it to a human with its reasoning attached.
 
 The interesting part is not the agent. It is the reliability layer around it: a
 hand-labelled golden dataset, traced runs, evals gating CI, versioned prompts,

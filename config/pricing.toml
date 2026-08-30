@@ -1,0 +1,11 @@
+# USD per 1,000,000 tokens. Groq publishes no machine-readable price feed,
+# so every entry records when it was checked by hand against
+# https://console.groq.com/docs/model/<model> and/or https://groq.com/pricing.
+# An unpriced model costs 0.0 in llm/pricing.py rather than breaking a run -
+# see that module for why.
+
+[models."openai/gpt-oss-120b"]
+input_per_1m  = 0.15
+output_per_1m = 0.60
+checked_on    = "2026-08-22"
+source        = "https://console.groq.com/docs/model/openai/gpt-oss-120b"

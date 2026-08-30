@@ -1,12 +1,16 @@
-"""The rule engine: R1-R7 from docs/rules.md, as deterministic code.
+"""The rule engine: R1-R4 from docs/rules.md, as deterministic code.
 
-The rules run in code, not in the model. R1-R7 are field comparisons with a
+The rules run in code, not in the model. R1-R4 are field comparisons with a
 fixed precedence; an LLM re-deriving them probabilistically would add cost and
 latency and produce a disagreement class that is almost always "the model was
 wrong". The model's job starts where this engine returns NOT_COVERED.
 
 Every outcome names the rule that produced it, so a filed decision can always
-be traced to the rule that justified it.
+be traced to the rule that justified it. There are only two outcomes a rule can
+reach: FILE or ESCALATE. `ignore` is not reachable deterministically - it is
+always a claim about a document this engine never opens (see docs/rules.md,
+"The two outcomes"); NOT_COVERED hands that claim to assess() instead of
+asserting it from the register alone.
 """
 
 from __future__ import annotations
@@ -24,14 +28,13 @@ WATCHED_FIELDS = (
 
 DIMENSIONAL_FIELDS = ("maxbygnhjd", "maxetager", "bebygpct")
 
-RULE_SET_ID = "zealand-local-plans-v1"
+RULE_SET_ID = "zealand-local-plans-v2"
 
 
 class Outcome(str, Enum):
     FILE = "file"
     ESCALATE = "escalate"
-    IGNORE = "ignore"
-    # Not one of the three published outcomes: it is the engine declining to
+    # Not one of the two published outcomes: it is the engine declining to
     # decide, which hands the case to the assessment step.
     NOT_COVERED = "not_covered"
 
@@ -53,7 +56,7 @@ def _is_blank(value: object) -> bool:
     """A field is blank when the register carries no value for it.
 
     Empty strings are treated as blank because the register uses both.
-    Zero is *not* blank - a recorded 0 is a value, and R5/R6 exist to deal
+    Zero is *not* blank - a recorded 0 is a value, and R1 exists to deal
     with what it means.
     """
     if value is None:
@@ -80,10 +83,11 @@ def _as_number(value: object) -> float | None:
 
 
 def _impossible(version: dict) -> tuple[bool, str]:
-    """R5's test, applied to a single version of a sub-area.
+    """R1's physical-impossibility test, applied to a single version of a
+    sub-area.
 
-    Two sub-cases, both meaning the record cannot be relied upon:
-    more storeys than metres of height, or a height recorded as 0.
+    Two sub-cases, both meaning the record cannot be relied upon: more
+    storeys than metres of height, or a height recorded as 0.
     """
     height = _as_number(version.get("maxbygnhjd"))
     storeys = _as_number(version.get("maxetager"))
@@ -122,33 +126,39 @@ def _direction(before: object, after: object) -> str:
 
 
 def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
-    """Apply R1-R7 in the precedence order given in docs/rules.md.
+    """Apply R1-R4 in the precedence order given in docs/rules.md.
 
     ``changed_fields`` maps a watched field to ``{"before": x, "after": y}``,
     the same shape the golden dataset uses, so eval cases and live changes are
     interchangeable.
 
     Precedence (first match wins):
-      1. R5  physically impossible records
-      2. R6  built percentage to zero
-      3. R1, R2  real value changes            -> file
-      4. R3  pure additions                    -> ignore
-      5. R4  pure removals                     -> escalate
-      6. R7  mixed                             -> escalate
+      1. R1  physically impossible records                    -> escalate
+      2. R2  a watched field value -> different value          -> file
+      3. R3  field(s) gained a value, none lost                -> file
+      4. R4  any field lost its value (alone, or mixed with
+              gains)                                           -> escalate
+      -  seen before, new version, no watched field differs    -> not_covered
 
-    Data-integrity rules come first: a change derived from an unreliable record
+    Data-integrity comes first: a change derived from an unreliable record
     should not be filed as though it were fact, whatever else it looks like.
+    A revision where no watched field differs is not asserted "unchanged" -
+    it is handed to assess() as the honest "we cannot see what changed."
     """
     watched_changes = {f: c for f, c in changed_fields.items() if f in WATCHED_FIELDS}
 
     if not watched_changes:
         return Decision(
-            outcome=Outcome.IGNORE,
+            outcome=Outcome.NOT_COVERED,
             rule=None,
-            reason="No watched field differs between the two versions.",
+            reason=(
+                "This sub-area has been seen before and a new version exists, but no "
+                "watched field differs from the last version stored. Something moved "
+                "outside the five watched fields; the register alone cannot say what."
+            ),
         )
 
-    # --- R5: physically impossible records ---------------------------------
+    # --- R1: physically impossible records ----------------------------------
     # Checked against both versions: a conclusion drawn from an unreliable
     # record is unreliable even when the unreliable side is the older one.
     for label, version in (("earlier", before), ("later", after)):
@@ -156,7 +166,7 @@ def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
         if bad:
             return Decision(
                 outcome=Outcome.ESCALATE,
-                rule="R5",
+                rule="R1",
                 reason=(
                     f"The {label} version is physically impossible: {why}. "
                     "Any conclusion drawn from this record is unreliable, so a person "
@@ -164,7 +174,9 @@ def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
                 ),
             )
 
-    # --- R6: built percentage falling to zero ------------------------------
+    # bebygpct falling from a real value to 0 is the third R1 sub-case - a
+    # transition, not a single-version check, since a first-time value of 0
+    # is a new value (R3), not an impossible record.
     if "bebygpct" in watched_changes:
         change = watched_changes["bebygpct"]
         before_pct = _as_number(change.get("before"))
@@ -172,7 +184,7 @@ def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
         if after_pct == 0 and before_pct is not None and before_pct != 0:
             return Decision(
                 outcome=Outcome.ESCALATE,
-                rule="R6",
+                rule="R1",
                 reason=(
                     f"Built percentage fell from {before_pct:g} to 0. Taken literally that "
                     "forbids all building, which is more likely a data entry than a "
@@ -194,15 +206,15 @@ def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
             real_changes.append(field)
         # blank -> blank is not a change at all and is ignored.
 
-    # --- R1 / R2: real value changes ---------------------------------------
+    # --- R2: any watched field value -> different value ---------------------
     if real_changes:
-        # R1 outranks R2: use decides what may be built at all, which outranks
-        # every dimensional limit.
+        # Use outranks dimensions outranks zone, for the reason text - the
+        # outcome is the same (file) regardless of which field changed.
         if "anvendelsegenerel" in real_changes:
             change = watched_changes["anvendelsegenerel"]
             return Decision(
                 outcome=Outcome.FILE,
-                rule="R1",
+                rule="R2",
                 reason=(
                     "Permitted use changed: "
                     f"{_describe('anvendelsegenerel', change['before'], change['after'])}. "
@@ -225,62 +237,64 @@ def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
                 reason="A dimensional limit changed: " + "; ".join(parts) + ".",
             )
 
-        # A real change confined to zonestatus. The rule set files use and
-        # dimensional limits, and ignores, escalates or is silent elsewhere -
-        # it does not say what a zone reclassification means on its own.
+        # A real change confined to zonestatus. v2 files this like any other
+        # watched-field value change: a reader watching this land now sees a
+        # zone status where before it read differently.
         change = watched_changes["zonestatus"]
         return Decision(
-            outcome=Outcome.NOT_COVERED,
-            rule=None,
+            outcome=Outcome.FILE,
+            rule="R2",
             reason=(
-                "Zone status changed on its own: "
-                f"{_describe('zonestatus', change['before'], change['after'])}. "
-                "The rule set covers changes to permitted use and to dimensional limits, "
-                "and does not state what a zone reclassification alone means."
+                "Zone status changed: "
+                f"{_describe('zonestatus', change['before'], change['after'])}."
             ),
         )
 
-    # --- R3 / R4 / R7: additions and removals ------------------------------
-    if additions and removals:
-        return Decision(
-            outcome=Outcome.ESCALATE,
-            rule="R7",
-            reason=(
-                f"Some fields gained values ({', '.join(sorted(additions))}) while others "
-                f"lost them ({', '.join(sorted(removals))}) in the same revision. That "
-                "mixture is more consistent with a record being reworked than with rules "
-                "changing, but it cannot be assumed."
-            ),
-        )
-
-    if additions:
-        return Decision(
-            outcome=Outcome.IGNORE,
-            rule="R3",
-            reason=(
-                f"{', '.join(sorted(additions))} gained a value for the first time and no "
-                "other field changed value. Nothing was loosened or tightened; the register "
-                "was completed."
-            ),
-        )
-
+    # --- R4: any field lost its value (alone, or mixed with gains) ----------
+    # Checked before R3 so a mixed gain/loss revision escalates on this
+    # branch rather than being caught by the pure-addition check below.
     if removals:
         parts = [
             _describe(f, watched_changes[f]["before"], watched_changes[f]["after"])
             for f in sorted(removals)
         ]
-        return Decision(
-            outcome=Outcome.ESCALATE,
-            rule="R4",
-            reason=(
+        if additions:
+            parts += [
+                _describe(f, watched_changes[f]["before"], watched_changes[f]["after"])
+                for f in sorted(additions)
+            ]
+            reason = (
+                f"Some fields gained values ({', '.join(sorted(additions))}) while others "
+                f"lost them ({', '.join(sorted(removals))}) in the same revision. A limit "
+                "that was recorded is now blank, and the register alone cannot say why: "
+                + "; ".join(parts) + "."
+            )
+        else:
+            reason = (
                 "A limit that was recorded is now blank: " + "; ".join(parts) + ". "
                 "The figure a reader would quote is no longer in the register, and the "
                 "cause is unclear."
+            )
+        return Decision(outcome=Outcome.ESCALATE, rule="R4", reason=reason)
+
+    # --- R3: field(s) gained a value, none lost ------------------------------
+    if additions:
+        return Decision(
+            outcome=Outcome.FILE,
+            rule="R3",
+            reason=(
+                f"{', '.join(sorted(additions))} now carries a value where none was stated "
+                "before. A reader watching this land now sees a limit that was not visible "
+                "to them before, so it is filed."
             ),
         )
 
     return Decision(
-        outcome=Outcome.IGNORE,
+        outcome=Outcome.NOT_COVERED,
         rule=None,
-        reason="No watched field changed value.",
+        reason=(
+            "This sub-area has been seen before and a new version exists, but no watched "
+            "field differs from the last version stored. Something moved outside the five "
+            "watched fields; the register alone cannot say what."
+        ),
     )

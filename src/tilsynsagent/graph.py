@@ -35,6 +35,7 @@ from tilsynsagent.db import repo
 from tilsynsagent.detect import diff_versions
 from tilsynsagent.llm.assess import assess
 from tilsynsagent.llm.summarise import summarise
+from tilsynsagent.llm.usage import take_last_usage
 from tilsynsagent.rules.engine import RULE_SET_ID, Outcome, apply_rules
 from tilsynsagent.sources.plandata import SubAreaRecord
 
@@ -54,9 +55,14 @@ class GraphState(TypedDict, total=False):
     before: dict | None
     after: dict
     changed_fields: dict
+    # True when the fetched record's feature_id matches the sub-area's last
+    # stored version - the same source row re-served, not a new revision.
+    # See _route_after_detect: this routes to skip, same as before_version_id
+    # being None.
+    same_feature: bool
 
     # --- classify / decide ---
-    outcome: Literal["file", "escalate", "ignore"]
+    outcome: Literal["file", "escalate", "not_covered"]
     rule: str | None
     rule_reason: str
 
@@ -64,8 +70,15 @@ class GraphState(TypedDict, total=False):
     assessment_what_is_unclear: str
     assessment_what_a_person_must_decide: str
 
+    # --- LLM usage, one entry per model call made this run (plain dicts -
+    # see the msgpack note on `record` above; Usage.to_dict() produces this
+    # shape). assess and summarise each add at most one entry; _escalate_node
+    # never adds one, since it makes no LLM call itself and re-executes on
+    # resume - see graph.py's docstring on interrupt() re-entry. ---
+    usage: list[dict]
+
     # --- result ---
-    result: dict  # {"diff_id":..., "filing_id"|"escalation_id":...} or {"ignored": True}
+    result: dict  # {"diff_id":..., "filing_id"|"escalation_id":...} or {"skipped": True}
 
 
 def _sub_area_description(record: SubAreaRecord) -> str:
@@ -98,23 +111,23 @@ def make_graph(database_url: str | None = None):
     builder.add_node("assess", _assess_node)
     builder.add_node("file", _file_node)
     builder.add_node("escalate", _escalate_node)
-    builder.add_node("ignore", _ignore_node)
+    builder.add_node("skip", _skip_node)
 
     builder.add_edge(START, "detect")
     builder.add_conditional_edges(
         "detect",
         _route_after_detect,
-        {"decide": "decide", "ignore": "ignore"},
+        {"decide": "decide", "skip": "skip"},
     )
     builder.add_conditional_edges(
         "decide",
         _route_after_decide,
-        {"file": "file", "escalate": "escalate", "assess": "assess", "ignore": "ignore"},
+        {"file": "file", "escalate": "escalate", "assess": "assess"},
     )
     builder.add_edge("assess", "escalate")
     builder.add_edge("file", END)
     builder.add_edge("escalate", END)
-    builder.add_edge("ignore", END)
+    builder.add_edge("skip", END)
 
     graph = builder.compile(checkpointer=checkpointer)
     return graph, saver_cm
@@ -126,8 +139,11 @@ def make_graph(database_url: str | None = None):
 def _detect_node(state: GraphState) -> dict:
     """Looks up the sub-area's stored last version, inserts the new version,
     and produces the normalised diff. If this is the sub-area's first
-    sighting, there is nothing to compare against - it goes straight to
-    ignore (nothing "changed" from a version that didn't exist)."""
+    sighting, there is nothing to compare against - it is skipped silently
+    (deduplication, not a rule outcome: nothing "changed" from a version
+    that didn't exist). A seen-before sub-area with no watched-field change
+    still goes to `decide`, where the engine's NOT_COVERED branch hands it
+    to assess() - see _route_after_detect."""
     record = SubAreaRecord.from_dict(state["record"])
     database_url = os.environ["DATABASE_URL"]
     with psycopg.connect(database_url) as conn:
@@ -144,6 +160,24 @@ def _detect_node(state: GraphState) -> dict:
                 "before": None,
                 "after": _to_version_dict(record),
                 "changed_fields": {},
+                "same_feature": False,
+            }
+
+        if previous["feature_id"] == record.feature_id:
+            # The exact same source row, re-served by the WFS query (most
+            # often: a re-run before the watermark advanced past it). Not a
+            # new revision - insert_version()'s ON CONFLICT already proved
+            # that by returning the existing row id instead of a new one.
+            # Nothing to diff, so this is deduplication, not a decision -
+            # see _route_after_detect.
+            return {
+                "sub_area_id": sub_area_id,
+                "before_version_id": previous["id"],
+                "after_version_id": after_version_id,
+                "before": _to_stored_version_dict(previous),
+                "after": _to_stored_version_dict(previous),
+                "changed_fields": {},
+                "same_feature": True,
             }
 
         previous_record = SubAreaRecord(
@@ -171,11 +205,29 @@ def _detect_node(state: GraphState) -> dict:
         "before": diff.before,
         "after": diff.after,
         "changed_fields": diff.changed_fields,
+        "same_feature": False,
     }
 
 
 def _route_after_detect(state: GraphState) -> str:
-    return "decide" if state["changed_fields"] else "ignore"
+    """Two shapes of "nothing to decide", both deduplication rather than a
+    rule outcome:
+
+    - First-ever sighting (before_version_id is None) - no prior version to
+      have changed from.
+    - Same feature_id as the last stored version (same_feature is True) -
+      the exact same source row, re-served by the WFS query rather than a
+      genuine new revision. Comparing it to itself would always report zero
+      watched-field differences and fall through to NOT_COVERED, which is
+      not an honest "we cannot see what changed" - there is nothing new to
+      not-see.
+
+    A seen-before sub-area with a genuinely new feature_id always goes to
+    `decide`, even with an empty changed_fields - that is the no-visible-
+    change case the engine's NOT_COVERED branch exists for."""
+    if state["before_version_id"] is None or state.get("same_feature"):
+        return "skip"
+    return "decide"
 
 
 def _decide_node(state: GraphState) -> dict:
@@ -193,7 +245,7 @@ def _route_after_decide(state: GraphState) -> str:
     outcome = state["outcome"]
     if outcome == Outcome.NOT_COVERED.value:
         return "assess"
-    return outcome  # "file" | "escalate" | "ignore"
+    return outcome  # "file" | "escalate"
 
 
 def _assess_node(state: GraphState) -> dict:
@@ -205,11 +257,13 @@ def _assess_node(state: GraphState) -> dict:
         changed_fields=state["changed_fields"],
         doklink=record.doklink or "",
     )
+    usage = take_last_usage()
     return {
         "outcome": "escalate",
         "rule": None,
         "assessment_what_is_unclear": result.what_is_unclear,
         "assessment_what_a_person_must_decide": result.what_a_person_must_decide,
+        "usage": [usage.to_dict()] if usage else [],
     }
 
 
@@ -222,6 +276,7 @@ def _file_node(state: GraphState) -> dict:
         rule_reason=state["rule_reason"],
         doklink=record.doklink or "",
     )
+    usage = take_last_usage()
     database_url = os.environ["DATABASE_URL"]
     with psycopg.connect(database_url) as conn, conn.transaction():
         result = file_decision(
@@ -236,7 +291,10 @@ def _file_node(state: GraphState) -> dict:
             summary=summary,
             citation=record.doklink or "",
         )
-    return {"result": {"diff_id": result.diff_id, "filing_id": result.filing_id}}
+    return {
+        "result": {"diff_id": result.diff_id, "filing_id": result.filing_id},
+        "usage": [usage.to_dict()] if usage else [],
+    }
 
 
 def _escalate_node(state: GraphState) -> dict:
@@ -291,12 +349,30 @@ def _escalate_node(state: GraphState) -> dict:
     return {"result": {"diff_id": result.diff_id, "escalation_id": result.escalation_id}}
 
 
-def _ignore_node(state: GraphState) -> dict:
-    """Ignored changes are not written as diffs. Per docs/rules.md, ignore
-    means nothing about what may be built has changed - there is nothing to
-    file or escalate, and the version row inserted in detect already records
-    that this version was seen."""
-    return {"result": {"ignored": True}}
+def _skip_node(state: GraphState) -> dict:
+    """A sub-area's first-ever sighting, or the same feature_id re-served by
+    the WFS query. Either way this is deduplication, not a rule outcome -
+    there is nothing new to have changed from, so nothing is written as a
+    diff. The version row inserted in detect already records that this
+    version was seen (or was already stored, for the same-feature case)."""
+    return {"result": {"skipped": True}}
+
+
+def _to_stored_version_dict(row: dict) -> dict:
+    """Same shape as _to_version_dict, but read from a sub_area_versions row
+    already in the database rather than a freshly fetched SubAreaRecord -
+    used only for the same-feature short-circuit in _detect_node, where
+    before and after are the same stored row."""
+    return {
+        "status": row["status"],
+        "updated": row["datoopdt"].isoformat(),
+        "version": row["versionsnr"],
+        "maxbygnhjd": row["maxbygnhjd"],
+        "maxetager": row["maxetager"],
+        "bebygpct": row["bebygpct"],
+        "zonestatus": row["zonestatus"],
+        "anvendelsegenerel": row["anvendelsegenerel"],
+    }
 
 
 def _to_version_dict(record: SubAreaRecord) -> dict:

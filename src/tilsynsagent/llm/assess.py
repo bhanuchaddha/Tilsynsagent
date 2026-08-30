@@ -15,11 +15,15 @@ project's decision architecture exists to avoid.
 from __future__ import annotations
 
 import os
+import time
 
 from groq import Groq
 from pydantic import BaseModel, Field
 
+from tilsynsagent import obs
+from tilsynsagent.llm.client import groq_client
 from tilsynsagent.llm.schema import response_format
+from tilsynsagent.llm.usage import Usage
 from tilsynsagent.rules.loader import load_not_covered_section
 
 DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
@@ -74,19 +78,34 @@ def assess(
     model: str = DEFAULT_MODEL,
 ) -> Assessment:
     """Calls Groq for a case the rule engine returned NOT_COVERED on."""
-    client = client or Groq(api_key=os.environ["GROQ_API_KEY"])
+    client = client or groq_client()
     prompt = build_prompt(
         sub_area_description=sub_area_description,
         changed_fields=changed_fields,
         doklink=doklink,
     )
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        response_format=response_format(Assessment, "assessment"),
-        temperature=0,
-    )
+    with obs.record_generation("assess", model=model) as gen:
+        start = time.monotonic()
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            response_format=response_format(Assessment, "assessment"),
+            temperature=0,
+        )
+        latency_ms = (time.monotonic() - start) * 1000
+        usage = Usage.from_groq(resp, model=model, latency_ms=latency_ms)
+        usage.record()
+        if gen is not None:
+            gen.update(
+                input=prompt,
+                output=resp.choices[0].message.content,
+                usage_details={
+                    "input": usage.prompt_tokens,
+                    "output": usage.completion_tokens,
+                    "total": usage.total_tokens,
+                },
+            )
     return Assessment.model_validate_json(resp.choices[0].message.content)

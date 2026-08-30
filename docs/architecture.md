@@ -12,7 +12,7 @@ document describes what exists now.
 **The rules run in code. The model handles what the rules explicitly do not
 cover.**
 
-Seven rules ([`docs/rules.md`](rules.md)) decide whether a change to a
+Four rules ([`docs/rules.md`](rules.md)) decide whether a change to a
 municipal local plan matters. They are deterministic field comparisons - "did
 the permitted use change", "did a value that used to be recorded go blank" -
 and they are applied in plain Python, not by asking a language model to judge
@@ -21,13 +21,14 @@ latency, and when it disagrees with the rule, that disagreement is almost
 always "the model made an arithmetic mistake," not a real judgement call
 worth having.
 
-So the model is never asked to apply R1-R7. It is only invoked for the cases
+So the model is never asked to apply R1-R4. It is only invoked for the cases
 the rule set is explicit about not covering: a sub-area renumbered or split
-between versions, a plan cancelled without an obvious replacement, anything
-that would require reading the source PDF. On the 34-case hand-labelled
-dataset this is a minority of cases, but across the full historical record it
-is not rare - the rule set itself documents that data-integrity edge cases
-and ambiguous transitions are common, not exotic.
+between versions, a plan cancelled without an obvious replacement, a revision
+where no watched field differs from what was last stored, anything that would
+require reading the source PDF. On the 34-case hand-labelled dataset this is a
+minority of cases, but across the full historical record it is not rare - the
+rule set itself documents that data-integrity edge cases and ambiguous
+transitions are common, not exotic.
 
 **The line this produces:** the model never decides what is compliant. It
 decides what is worth a person's attention, and explains why. Every filed
@@ -62,10 +63,11 @@ this is the first time the system has seen this sub-area, there is nothing to
 compare against, so it is treated as unchanged - not filed, not escalated.
 
 **classify / decide** — the diff is run through the rule engine, which
-applies R1 through R7 in a fixed precedence order (data-integrity checks
-first, then real value changes, then additions, then removals, then mixed
-changes) and returns one of three outcomes plus the rule that produced it:
-file, escalate, or "not covered."
+applies R1 through R4 in a fixed precedence order (data-integrity checks
+first, then real value changes, then additions, then removals - alone or
+mixed with additions) and returns one of two outcomes plus the rule that
+produced it - file or escalate - or "not covered" when no rule matches,
+which the engine itself never resolves to "nothing happened."
 
 **assess** (model, only on "not covered") — given the change, the exact
 wording of what the rule set says it does not cover, and a link to the source
@@ -105,25 +107,25 @@ Source: [`src/tilsynsagent/rules/engine.py`](../src/tilsynsagent/rules/engine.py
 
 Precedence, first match wins:
 
-1. **R5** - physically impossible records (more storeys than metres of
-   height, or a height of exactly 0) are escalated regardless of what else
-   changed, because a conclusion drawn from an unreliable record is itself
-   unreliable.
-2. **R6** - built percentage falling to exactly 0 is escalated.
-3. **R1 / R2** - a real change to permitted use, or to a dimensional limit,
-   is filed. Use outranks dimensions: it decides what may be built at all.
-4. **R3** - a field going from blank to a value, with nothing else changing,
-   is ignored. The register was completed, not changed.
-5. **R4** - a field going from a value to blank is escalated. The figure a
+1. **R1** - physically impossible records (more storeys than metres of
+   height, a height of exactly 0, or built percentage falling to exactly 0)
+   are escalated regardless of what else changed, because a conclusion drawn
+   from an unreliable record is itself unreliable.
+2. **R2** - any watched field changing from one value to a different value -
+   permitted use, a dimensional limit, or zone status - is filed. Use
+   outranks dimensions outranks zone, in the reason text only; the outcome is
+   file regardless.
+3. **R3** - a field going from blank to a value, with nothing lost in the
+   same revision, is filed. The reader now sees a limit they did not see
+   before.
+4. **R4** - any field going from a value to blank, alone or mixed with
+   fields gaining values in the same revision, is escalated. The figure a
    reader would quote is gone, and the register alone cannot say why.
-6. **R7** - some fields gaining values while others lose them, in the same
-   revision, is escalated as more likely a record being reworked than a real
-   rule change.
 
-A zone-status change occurring alone, with no use or dimensional change
-alongside it, falls through all seven rules and is explicitly routed to the
-model - the rule set does not state what a reclassification alone means, and
-the engine does not guess.
+A revision where the sub-area has been seen before but no watched field
+differs from what was last stored falls through all four rules and is
+explicitly routed to the model as "not covered," which always escalates from
+there - the register alone cannot say what moved, only that something did.
 
 ---
 

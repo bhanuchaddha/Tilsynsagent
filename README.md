@@ -10,9 +10,10 @@ the agent itself. It is built and written up for that purpose; treat it as a
 worked example and reference architecture, not as a live regulatory tool.
 
 An agent that watches public Danish regulatory and municipal publications,
-detects what changed, decides whether each change matters against a written rule
-set, and then either files it with a structured summary or escalates it to a
-human with its reasoning attached.
+detects what changed, and answers one question against a written rule set:
+does the reader now see something on land they care about that they could not
+see before? It then either files that with a structured summary or escalates
+it to a human with its reasoning attached.
 
 It runs unattended on a schedule, uses tools to do its work, makes autonomous
 decisions, and — the part that took the most effort — knows when not to.
@@ -76,14 +77,19 @@ decision by decision, with the tokens and cost attached.
 
 This is the actual substance of the project.
 
-**Golden dataset.** Real changes from real sources, hand-labelled against a
-written rule set as *should file / should escalate / should ignore*, each with a
-one-line reason. Written before the agent was, so the definition of correct was
-not quietly shaped by whatever the system happened to do.
+**Golden dataset.** Real changes from real sources, labelled against a written
+rule set as *should file / should escalate*, each with a one-line reason.
+Written before the agent was, so the definition of correct was not quietly
+shaped by whatever the system happened to do. `ignore` is not a label the rule
+set can reach on its own - see [`docs/rules.md`](docs/rules.md) on why.
 
 **Tracing.** Every run, every tool call, every decision, every token, in
-self-hosted Langfuse. Self-hosted specifically so the data stays where it should
-for EU deployment.
+Langfuse Cloud. Free tier retains data 30 days, which is why anything that
+needs to outlive that - a baseline, a regression, an incident - gets
+committed into [`docs/evals/`](docs/evals/) at the moment it happens, not
+just linked to. Langfuse is MIT-licensed and self-hostable if the free tier
+is outgrown, which is also the path to EU data residency for a Danish
+deployment; see `CLAUDE.md`'s stack table for the reasoning.
 
 **Evals in CI.** The golden dataset runs as an eval suite. A pull request that
 lowers the score does not merge.
@@ -115,14 +121,15 @@ This section describes what is actually working, not what is planned.
 - [x] Agent runs end to end, files or escalates unattended (LangGraph graph,
       rule engine, LLM assess/summarise, Postgres-backed escalation via
       `interrupt()`)
-- [ ] Runs traced, baseline eval score recorded
+- [x] Runs traced, two dated baselines recorded ([`docs/evals/`](docs/evals/)) —
+      one per rule-set version, v1 and v2
 - [ ] Evals gating CI
 - [ ] Prompt registry, rollback executed and timed
 - [ ] Public status page
 
-Phase 1 (the agent itself, deterministic rule engine, escalation path) is
-built and tested. Phase 2 (tracing, evals, CI gating) and Phase 3 (prompt
-registry, rollback) are not yet built — see
+Phase 1 (the agent itself, deterministic rule engine, escalation path) and
+Phase 2 (tracing, evals, baseline measurement) are built and tested. CI gating
+and Phase 3 (prompt registry, rollback) are not yet built — see
 [`docs/architecture.md`](docs/architecture.md) for what exists today and what
 is explicitly deferred.
 

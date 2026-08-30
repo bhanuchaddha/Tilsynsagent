@@ -44,19 +44,77 @@ def test_golden_dataset_is_100_percent():
     assert mismatches == [], f"engine disagreed with golden labels: {mismatches}"
 
 
-# --- R1: permitted use change is always filed -------------------------------
+# --- R1: physically impossible records are escalated -------------------------
 
 
-def test_r1_use_change_files():
+def test_r1_more_storeys_than_metres():
+    before = {"maxbygnhjd": 2, "maxetager": 10}
+    after = {"maxbygnhjd": 10, "maxetager": 2}
+    changed = {
+        "maxbygnhjd": {"before": 2, "after": 10},
+        "maxetager": {"before": 10, "after": 2},
+    }
+    d = apply_rules(changed, before, after)
+    assert d.outcome is Outcome.ESCALATE
+    assert d.rule == "R1"
+
+
+def test_r1_zero_height():
+    before = {"maxbygnhjd": 8.5, "maxetager": 2}
+    after = {"maxbygnhjd": 0, "maxetager": 2}
+    changed = {"maxbygnhjd": {"before": 8.5, "after": 0}}
+    d = apply_rules(changed, before, after)
+    assert d.outcome is Outcome.ESCALATE
+    assert d.rule == "R1"
+
+
+def test_r1_bebygpct_to_zero():
+    before = {"bebygpct": 40}
+    after = {"bebygpct": 0}
+    changed = {"bebygpct": {"before": 40, "after": 0}}
+    d = apply_rules(changed, before, after)
+    assert d.outcome is Outcome.ESCALATE
+    assert d.rule == "R1"
+
+
+def test_r1_bebygpct_zero_does_not_fire_when_no_prior_value():
+    """bebygpct appearing as 0 for the first time is R3 (an addition), not
+    R1 - there was nothing to fall from, so the record is not impossible."""
+    before = {"bebygpct": None}
+    after = {"bebygpct": 0}
+    changed = {"bebygpct": {"before": None, "after": 0}}
+    d = apply_rules(changed, before, after)
+    assert d.rule == "R3"
+    assert d.outcome is Outcome.FILE
+
+
+def test_r1_takes_precedence_over_r2():
+    """A record can trip both R1 and a real value change; R1 comes first."""
+    before = {"maxbygnhjd": 2, "maxetager": 10, "anvendelsegenerel": "Boligområde"}
+    after = {"maxbygnhjd": 10, "maxetager": 2, "anvendelsegenerel": "Erhvervsområde"}
+    changed = {
+        "maxbygnhjd": {"before": 2, "after": 10},
+        "maxetager": {"before": 10, "after": 2},
+        "anvendelsegenerel": {"before": "Boligområde", "after": "Erhvervsområde"},
+    }
+    d = apply_rules(changed, before, after)
+    assert d.rule == "R1"
+    assert d.outcome is Outcome.ESCALATE
+
+
+# --- R2: any watched field value -> different value is filed -----------------
+
+
+def test_r2_use_change_files():
     before = {"anvendelsegenerel": "Boligområde"}
     after = {"anvendelsegenerel": "Erhvervsområde"}
     changed = {"anvendelsegenerel": {"before": "Boligområde", "after": "Erhvervsområde"}}
     d = apply_rules(changed, before, after)
     assert d.outcome is Outcome.FILE
-    assert d.rule == "R1"
+    assert d.rule == "R2"
 
 
-def test_r1_outranks_r2_when_both_change():
+def test_r2_use_outranks_dimensions_when_both_change():
     before = {"anvendelsegenerel": "Boligområde", "maxbygnhjd": 8.5}
     after = {"anvendelsegenerel": "Erhvervsområde", "maxbygnhjd": 10}
     changed = {
@@ -64,10 +122,8 @@ def test_r1_outranks_r2_when_both_change():
         "maxbygnhjd": {"before": 8.5, "after": 10},
     }
     d = apply_rules(changed, before, after)
-    assert d.rule == "R1"
-
-
-# --- R2: dimensional limit change is filed -----------------------------------
+    assert d.rule == "R2"
+    assert "Use decides" in d.reason
 
 
 def test_r2_height_change_files_with_direction():
@@ -89,19 +145,29 @@ def test_r2_decrease_states_direction():
     assert "decreased" in d.reason
 
 
-# --- R3: field populated for the first time is ignored -----------------------
+def test_r2_zone_status_change_files():
+    """v2: zone status is decidable like any other watched field."""
+    before = {"zonestatus": "Byzone"}
+    after = {"zonestatus": "Sommerhusområde"}
+    changed = {"zonestatus": {"before": "Byzone", "after": "Sommerhusområde"}}
+    d = apply_rules(changed, before, after)
+    assert d.outcome is Outcome.FILE
+    assert d.rule == "R2"
 
 
-def test_r3_pure_addition_ignored():
+# --- R3: field(s) gained a value, none lost, is filed -------------------------
+
+
+def test_r3_pure_addition_filed():
     before = {"zonestatus": None}
     after = {"zonestatus": "Byzone"}
     changed = {"zonestatus": {"before": None, "after": "Byzone"}}
     d = apply_rules(changed, before, after)
-    assert d.outcome is Outcome.IGNORE
+    assert d.outcome is Outcome.FILE
     assert d.rule == "R3"
 
 
-def test_r3_multiple_additions_still_ignored():
+def test_r3_multiple_additions_still_filed():
     before = {"zonestatus": None, "bebygpct": None}
     after = {"zonestatus": "Byzone", "bebygpct": 40}
     changed = {
@@ -109,11 +175,11 @@ def test_r3_multiple_additions_still_ignored():
         "bebygpct": {"before": None, "after": 40},
     }
     d = apply_rules(changed, before, after)
-    assert d.outcome is Outcome.IGNORE
+    assert d.outcome is Outcome.FILE
     assert d.rule == "R3"
 
 
-# --- R4: limit disappearing is escalated -------------------------------------
+# --- R4: any field lost its value (alone, or mixed with gains) ---------------
 
 
 def test_r4_removal_escalated():
@@ -126,68 +192,9 @@ def test_r4_removal_escalated():
     assert "8.5" in d.reason
 
 
-# --- R5: physically impossible records are escalated -------------------------
-
-
-def test_r5_more_storeys_than_metres():
-    before = {"maxbygnhjd": 2, "maxetager": 10}
-    after = {"maxbygnhjd": 10, "maxetager": 2}
-    changed = {
-        "maxbygnhjd": {"before": 2, "after": 10},
-        "maxetager": {"before": 10, "after": 2},
-    }
-    d = apply_rules(changed, before, after)
-    assert d.outcome is Outcome.ESCALATE
-    assert d.rule == "R5"
-
-
-def test_r5_zero_height():
-    before = {"maxbygnhjd": 8.5, "maxetager": 2}
-    after = {"maxbygnhjd": 0, "maxetager": 2}
-    changed = {"maxbygnhjd": {"before": 8.5, "after": 0}}
-    d = apply_rules(changed, before, after)
-    assert d.outcome is Outcome.ESCALATE
-    assert d.rule == "R5"
-
-
-def test_r5_takes_precedence_over_r6():
-    """A record can trip both R5 and R6; R5 comes first in precedence."""
-    before = {"maxbygnhjd": 2, "maxetager": 10, "bebygpct": 40}
-    after = {"maxbygnhjd": 0, "maxetager": 10, "bebygpct": 0}
-    changed = {
-        "maxbygnhjd": {"before": 2, "after": 0},
-        "bebygpct": {"before": 40, "after": 0},
-    }
-    d = apply_rules(changed, before, after)
-    assert d.rule == "R5"
-
-
-# --- R6: built percentage falling to zero is escalated ------------------------
-
-
-def test_r6_bebygpct_to_zero():
-    before = {"bebygpct": 40}
-    after = {"bebygpct": 0}
-    changed = {"bebygpct": {"before": 40, "after": 0}}
-    d = apply_rules(changed, before, after)
-    assert d.outcome is Outcome.ESCALATE
-    assert d.rule == "R6"
-
-
-def test_r6_does_not_fire_when_no_prior_value():
-    """bebygpct appearing as 0 for the first time is R3, not R6 - there was
-    nothing to fall from."""
-    before = {"bebygpct": None}
-    after = {"bebygpct": 0}
-    changed = {"bebygpct": {"before": None, "after": 0}}
-    d = apply_rules(changed, before, after)
-    assert d.rule == "R3"
-
-
-# --- R7: mixed additions and removals are escalated ---------------------------
-
-
-def test_r7_mixed_addition_and_removal():
+def test_r4_mixed_addition_and_removal():
+    """v2 absorbs v1's R7: a mixed gain/loss revision is just R4 winning on
+    precedence over R3."""
     before = {"bebygpct": None, "zonestatus": "Byzone"}
     after = {"bebygpct": 70, "zonestatus": None}
     changed = {
@@ -196,27 +203,16 @@ def test_r7_mixed_addition_and_removal():
     }
     d = apply_rules(changed, before, after)
     assert d.outcome is Outcome.ESCALATE
-    assert d.rule == "R7"
+    assert d.rule == "R4"
 
 
-# --- No watched field changed --------------------------------------------------
+# --- No watched field changed: not_covered, handed to assess() ---------------
 
 
-def test_no_change_is_ignored():
+def test_no_watched_change_is_not_covered():
     before = {"maxbygnhjd": 8.5}
     after = {"maxbygnhjd": 8.5}
     d = apply_rules({}, before, after)
-    assert d.outcome is Outcome.IGNORE
-    assert d.rule is None
-
-
-# --- Not covered: zone status changing alone ------------------------------------
-
-
-def test_zonestatus_alone_is_not_covered():
-    before = {"zonestatus": "Byzone"}
-    after = {"zonestatus": "Sommerhusområde"}
-    changed = {"zonestatus": {"before": "Byzone", "after": "Sommerhusområde"}}
-    d = apply_rules(changed, before, after)
     assert d.outcome is Outcome.NOT_COVERED
+    assert d.rule is None
     assert not d.is_covered
