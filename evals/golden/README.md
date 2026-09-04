@@ -23,7 +23,8 @@ rather than re-labelled by hand. See "Composition," below, on why they carry
 | `id` | stable case identifier |
 | `label` | `file` / `escalate` — the correct outcome |
 | `reason` | one line, why that is the correct outcome |
-| `rule` | which rule in `docs/rules.md` decides it |
+| `rule` | which rule in `docs/rules.md` decides it. **`null` on escalation-derived cases** — their label came from a person, not a rule |
+| `escalated_rule` | escalation-derived cases only: the rule that *escalated* the case to a person (or `null` if the engine did not cover it) |
 | `rule_set` | which rule set it was judged against |
 | `origin` | `hand-labelled`; `rule-derived-v2` for the six cases relabelled by v2's rules rather than by hand; or `escalation-derived` once the running system contributes cases |
 | `source` | municipality, plan, sub-area, and a link to the source document |
@@ -80,6 +81,23 @@ this file, with `origin` set to `escalation-derived`.
 That is also what makes improvement measurable rather than asserted: a case that
 entered the set because the system failed can be re-run afterwards to show the
 failure is closed.
+
+**An escalation-derived case is not the same kind of object as a hand-labelled
+one, and the schema says so.** It records what a *person* decided about a case
+the engine escalated — and the interesting ones are precisely those where the
+person disagreed with the engine. So `rule` is `null` (no rule produced this
+label) and the escalating rule is recorded under `escalated_rule`. Putting the
+escalating rule in `rule` would assert that R-whatever *files* a case it
+actually escalates, and `tests/test_rules_engine.py`'s 100%-engine-agreement
+check would fail on a claim the dataset never meant to make.
+
+These cases are therefore excluded from that engine-agreement check and from
+the founding-34 composition counts the recorded baselines describe — a
+baseline's composition table has to stay comparable to the run that produced
+it. They are checked by their own test instead: the engine must still
+escalate them, and a case the engine has stopped escalating fails loudly
+rather than drifting, because that means either the rule set moved underneath
+the dataset or the case is now covered and should be relabelled deliberately.
 
 ## The synthetic NOT_COVERED set
 

@@ -40,6 +40,34 @@ THRESHOLDS_PATH = Path(__file__).resolve().parent / "thresholds.json"
 # not a regression. Below this fraction of cases completing, the gate exits 2.
 MIN_COMPLETION_RATE = 0.9
 
+# Error text that means "the run could not be completed" rather than "the
+# behaviour changed". A rate limit or a transport failure says nothing about
+# whether the model got worse, and reporting it as a regression trains people
+# to re-run the gate until it goes green - which destroys the gate. Matched
+# case-insensitively against each failed case's error.
+INCONCLUSIVE_ERROR_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "connection error",
+    "timeout",
+    "timed out",
+    "502",
+    "503",
+    "504",
+)
+
+
+def infrastructure_errors(records: list[dict]) -> list[str]:
+    """Case ids whose failure is an infrastructure problem, not a behaviour
+    change. Kept separate from the threshold comparison entirely."""
+    hits = []
+    for record in records:
+        error = str(record.get("error") or "")
+        if error and any(m in error.lower() for m in INCONCLUSIVE_ERROR_MARKERS):
+            hits.append(record["case_id"])
+    return hits
+
 
 def load_thresholds(path: Path = THRESHOLDS_PATH) -> dict:
     """Reads the committed thresholds, dropping documentation keys.
@@ -133,6 +161,7 @@ def main() -> int:
         payload = json.loads(Path(args.from_json).read_text())
         aggregate = dict(payload["passes"][0]["aggregate"])
         aggregate["rule_engine_coverage"] = payload["rule_engine_coverage"]
+        records_for_errors = payload["passes"][0].get("records", [])
         n_cases = payload["n_cases"]
         resolved = payload.get("resolved_models"), payload.get("resolved_prompts")
     else:
@@ -145,6 +174,7 @@ def main() -> int:
             cases = cases[: args.limit]
         coverage, _ = _rule_engine_coverage()
         records = run_pass(cases)
+        records_for_errors = records
         aggregate = _aggregate(records)
         aggregate["rule_engine_coverage"] = coverage
         n_cases = len(cases)
@@ -171,6 +201,20 @@ def main() -> int:
     # An inconclusive run must not read as either outcome - see the module
     # docstring. The error rate is over the cases that called the model at
     # all, which is what "could the run gather its evidence" means here.
+    # An infrastructure failure is never a verdict on behaviour, however few
+    # cases it hit. Groq's free tier has a *daily* token ceiling as well as a
+    # per-minute one, and exhausting it mid-run produced exactly this: two
+    # cases failing valid_structured_output on 429s, which read as a quality
+    # regression and is nothing of the sort.
+    infra = infrastructure_errors(records_for_errors)
+    if infra:
+        print(
+            f"INCONCLUSIVE: {len(infra)} case(s) failed on infrastructure, not behaviour: "
+            f"{', '.join(infra)}. This is not a regression verdict.",
+            file=sys.stderr,
+        )
+        return 2
+
     error_rate = aggregate.get("llm_step_error_rate", 0.0)
     if (1.0 - error_rate) < MIN_COMPLETION_RATE:
         print(

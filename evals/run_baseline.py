@@ -36,8 +36,14 @@ def _rule_engine_coverage() -> tuple[float, list[str]]:
     from evals.cases import load_golden_cases
     from tilsynsagent.rules.engine import apply_rules
 
+    # Escalation-derived cases record what a *person* decided about a case the
+    # engine escalated, and the interesting ones are exactly those where the
+    # person disagreed with the engine. Asking the engine to reproduce a human
+    # override it has never been taught is not a coverage measurement - see
+    # evals/golden/README.md and tests/test_rules_engine.py, which draw the
+    # same line.
+    golden = [c for c in load_golden_cases() if c.get("origin") != "escalation-derived"]
     mismatches = []
-    golden = load_golden_cases()
     for case in golden:
         decision = apply_rules(case["changed_fields"], case["before"], case["after"])
         ok = decision.outcome.value == case["label"] and (

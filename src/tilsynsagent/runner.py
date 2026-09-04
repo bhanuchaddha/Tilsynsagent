@@ -37,58 +37,6 @@ def _thread_id_for(record) -> str:
     return f"{record.lokplan_id}-{record.delnr}-{record.versionsnr}"
 
 
-def _score_run_if_sampled(result, *, record, thread_id: str) -> None:
-    """Scores one completed run against the record it actually saw.
-
-    No golden case is involved - see obs/online.py. Wrapped so a scoring
-    failure can never fail a run that has already written its decision:
-    losing a score is an observability gap, losing the decision is an
-    incident.
-    """
-    if not isinstance(result, dict):
-        return
-
-    outcome_result = result.get("result", {}) or {}
-    interrupts = result.get("__interrupt__")
-    if interrupts:
-        # A paused run: the escalation row is already written (see graph.py's
-        # _escalate_node, which writes before it interrupts), so the decision
-        # is real and scoreable even though the graph has not reached END.
-        outcome = "escalate"
-        interrupt_value = getattr(interrupts[0], "value", None) or {}
-        outcome_result = {
-            "escalation_id": interrupt_value.get("escalation_id"),
-            "diff_id": interrupt_value.get("diff_id"),
-        }
-        citation = interrupt_value.get("citation")
-    elif "filing_id" in outcome_result:
-        outcome = "file"
-        citation = record.doklink
-    elif "escalation_id" in outcome_result:
-        outcome = "escalate"
-        citation = record.doklink
-    else:
-        # Deduplication, not a decision - nothing to score.
-        return
-
-    if not obs.should_score(outcome=outcome, thread_id=thread_id):
-        return
-
-    scores = obs.score_run(
-        outcome=outcome,
-        rule=result.get("rule"),
-        citation=citation,
-        doklink=record.doklink,
-        result=outcome_result,
-    )
-    obs.record_scores(scores, thread_id=thread_id)
-    for score in scores:
-        if score.value < 1.0:
-            logger.warning(
-                "online score %s failed for thread %s: %s", score.name, thread_id, score.comment
-            )
-
-
 def run_once(database_url: str | None = None) -> dict:
     """One unattended pass: fetch new records since the watermark, run the
     graph on each, advance and persist the watermark. Returns counts."""
@@ -147,7 +95,7 @@ def run_once(database_url: str | None = None) -> dict:
                 # escalated, or paused at an interrupt, and scoring must never
                 # be skipped for the escalation path - see obs/online.py on why
                 # every escalation is scored and filings are sampled.
-                _score_run_if_sampled(result, record=record, thread_id=thread_id)
+                obs.score_completed_run(result, record=record, thread_id=thread_id)
 
                 interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
                 if interrupts:

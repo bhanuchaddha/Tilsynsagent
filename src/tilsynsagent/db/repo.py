@@ -257,3 +257,69 @@ def save_watermark(conn: psycopg.Connection, last_datoopdt: str, seen_at_waterma
         """,
         (last_datoopdt, json.dumps(seen_at_watermark)),
     )
+
+
+def status_counts(conn: psycopg.Connection) -> dict:
+    """What the system has watched, decided and escalated - the numbers the
+    status page publishes.
+
+    Live and demo rows are counted separately rather than summed: a status
+    page that reports demo activity as production activity is worse than no
+    status page, because it is confidently wrong. `is_test_data` on sub_areas
+    is the discriminator (migration 003), reached through the sub_area_id
+    every other table hangs off.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE NOT s.is_test_data)                    AS sub_areas_live,
+              COUNT(*) FILTER (WHERE s.is_test_data)                        AS sub_areas_demo
+            FROM sub_areas s
+            """
+        )
+        counts = dict(cur.fetchone())
+
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE NOT s.is_test_data) AS versions_live,
+              COUNT(*) FILTER (WHERE s.is_test_data)     AS versions_demo
+            FROM sub_area_versions v JOIN sub_areas s ON s.id = v.sub_area_id
+            """
+        )
+        counts.update(cur.fetchone())
+
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE NOT s.is_test_data) AS filings_live,
+              COUNT(*) FILTER (WHERE s.is_test_data)     AS filings_demo,
+              MAX(f.filed_at)                            AS last_filed_at
+            FROM filings f
+            JOIN diffs d ON d.id = f.diff_id
+            JOIN sub_areas s ON s.id = d.sub_area_id
+            """
+        )
+        counts.update(cur.fetchone())
+
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE NOT s.is_test_data) AS escalations_live,
+              COUNT(*) FILTER (WHERE s.is_test_data)     AS escalations_demo,
+              COUNT(*) FILTER (WHERE r.id IS NULL)       AS escalations_open,
+              MAX(e.escalated_at)                        AS last_escalated_at
+            FROM escalations e
+            JOIN diffs d ON d.id = e.diff_id
+            JOIN sub_areas s ON s.id = d.sub_area_id
+            LEFT JOIN escalation_resolutions r ON r.escalation_id = e.id
+            """
+        )
+        counts.update(cur.fetchone())
+
+        cur.execute("SELECT last_datoopdt FROM watermark WHERE id = 1")
+        row = cur.fetchone()
+        counts["watermark"] = row["last_datoopdt"] if row else None
+
+        return counts

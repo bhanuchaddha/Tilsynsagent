@@ -121,3 +121,38 @@ def test_documentation_keys_are_stripped_from_thresholds():
     assert not any(k.startswith("_") for k in thresholds)
     assert not any(k.startswith("_") for k in thresholds["scorers"])
     assert isinstance(thresholds["scorers"]["citation_fidelity"], float)
+
+
+# --- infrastructure failures are never a behaviour verdict ---------------
+
+
+def test_a_rate_limit_is_inconclusive_not_a_regression():
+    """Groq's free tier has a daily token ceiling as well as a per-minute one.
+    Exhausting it mid-run made two cases fail valid_structured_output on 429s,
+    which read as a quality regression and was nothing of the sort. Reporting
+    infrastructure as behaviour trains people to re-run the gate until it goes
+    green, which destroys the gate."""
+    from evals.gate import infrastructure_errors
+
+    records = [
+        {"case_id": "NC-004", "error": "Error code: 429 - rate limit reached ... (TPD)"},
+        {"case_id": "NC-005", "error": "Error code: 429 - rate limit reached ... (TPD)"},
+        {"case_id": "ZL-001", "error": None},
+    ]
+    assert infrastructure_errors(records) == ["NC-004", "NC-005"]
+
+
+def test_a_genuine_failure_is_not_treated_as_infrastructure():
+    """The other side of the boundary: a real error must not be excused as a
+    transport problem, or the gate can be silenced by a well-worded exception."""
+    from evals.gate import infrastructure_errors
+
+    records = [{"case_id": "ZL-004", "error": "schema validation failed: missing field"}]
+    assert infrastructure_errors(records) == []
+
+
+def test_transport_failures_are_recognised():
+    from evals.gate import infrastructure_errors
+
+    for error in ("Connection error.", "Read timed out", "Error code: 503"):
+        assert infrastructure_errors([{"case_id": "X", "error": error}]) == ["X"], error

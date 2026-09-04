@@ -81,7 +81,12 @@ def test_append_to_golden_dataset_writes_expected_shape(golden_path):
     assert case["id"] == "EC-001"
     assert case["label"] == "file"
     assert case["reason"] == "test reason"
-    assert case["rule"] == "R4"
+    # The escalating rule goes in escalated_rule, never in "rule": "rule"
+    # means "the rule that produced this label", and this label came from a
+    # person - often disagreeing with the engine, which is why the case is
+    # worth keeping. See evals/golden/README.md and test_rules_engine.py.
+    assert case["rule"] is None
+    assert case["escalated_rule"] == "R4"
     assert case["rule_set"] == "zealand-local-plans-v2"
     assert case["origin"] == "escalation-derived"
     assert case["source"]["municipality"] == "Testkommune"
@@ -106,7 +111,12 @@ def test_append_to_golden_dataset_is_readable_by_evals_cases(golden_path, monkey
 
     loaded = evals_cases.load_golden_cases()
     assert len(loaded) == 1
-    assert evals_cases.expected_route(loaded[0]) == "file"
+    # Route and label part company for escalation-derived cases: the route is
+    # what the system did (escalate, which is what put it in front of a
+    # person), the label is what the person then decided. See evals/cases.py's
+    # expected_route and tests/test_eval_cases.py.
+    assert evals_cases.expected_route(loaded[0]) == "escalate"
+    assert loaded[0]["label"] == "file"
 
 
 def test_append_to_golden_dataset_appends_without_clobbering(golden_path):

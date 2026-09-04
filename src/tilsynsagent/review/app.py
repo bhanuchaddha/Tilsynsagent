@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 from tilsynsagent.db import repo
 from tilsynsagent.demo.reset import reset_demo
 from tilsynsagent.graph import make_graph, resume_run
+from tilsynsagent.llm.pricing import load_pricing
 
 RESOLVED_BY = os.environ.get("TILSYNSAGENT_REVIEWER", "reviewer")
 GOLDEN_CASES_PATH = Path(__file__).resolve().parents[3] / "evals" / "golden" / "cases.jsonl"
@@ -61,11 +62,19 @@ def _append_to_golden_dataset(detail: dict, label: str, reason: str) -> str:
     time - see PLAN.md Phase 3, "The answer goes into the dataset -
     manually," on why this is never automatic."""
     case_id = _next_case_id()
+    # The rule that *escalated* is recorded under escalated_rule, never under
+    # "rule". "rule" means "the rule that produced this label", and the label
+    # here came from a person - often disagreeing with the engine, which is
+    # the whole reason the case is interesting. Writing the escalating rule
+    # into "rule" would assert that R-whatever files this case when it
+    # actually escalates it, and tests/test_rules_engine.py's 100% golden
+    # check would fail on a claim the dataset never meant to make.
     case = {
         "id": case_id,
         "label": label,
         "reason": reason,
-        "rule": detail["rule"],
+        "rule": None,
+        "escalated_rule": detail["rule"],
         "rule_set": detail["rule_set"],
         "origin": "escalation-derived",
         "source": {
@@ -264,12 +273,94 @@ def _add_to_dataset_section(detail: dict) -> None:
         st.rerun()
 
 
+def _status_view() -> None:
+    """What the system has watched, decided, escalated and cost.
+
+    Live and demo figures are shown separately and never summed: a status
+    page that counts demo activity as production activity is worse than no
+    status page, because it is confidently wrong.
+    """
+    st.title("Status")
+
+    with _conn() as conn:
+        counts = repo.status_counts(conn)
+
+    st.caption(
+        "Live figures are the unattended runs. Demo figures come from "
+        "`tilsynsagent seed-demo` and are cleared by the reset in the sidebar."
+    )
+
+    live, demo = st.columns(2)
+    with live:
+        st.subheader("Live")
+        st.metric("Sub-areas watched", counts["sub_areas_live"])
+        st.metric("Versions recorded", counts["versions_live"])
+        st.metric("Filed", counts["filings_live"])
+        st.metric("Escalated", counts["escalations_live"])
+    with demo:
+        st.subheader("Demo")
+        st.metric("Sub-areas watched", counts["sub_areas_demo"])
+        st.metric("Versions recorded", counts["versions_demo"])
+        st.metric("Filed", counts["filings_demo"])
+        st.metric("Escalated", counts["escalations_demo"])
+
+    st.divider()
+    st.subheader("Open escalations")
+    st.metric("Waiting for a person", counts["escalations_open"])
+
+    st.subheader("Watermark")
+    st.write(
+        f"Last source update processed: **{counts['watermark'] or 'never run'}**"
+    )
+    if counts["last_filed_at"]:
+        st.write(f"Last filing: {counts['last_filed_at']}")
+    if counts["last_escalated_at"]:
+        st.write(f"Last escalation: {counts['last_escalated_at']}")
+
+    st.divider()
+    st.subheader("Cost per run")
+    pricing = load_pricing()
+    st.write(
+        "Token prices are recorded by hand in `config/pricing.toml` with the "
+        "date each was checked, because Groq publishes no machine-readable "
+        "price feed. Per-run cost is computed from actual token usage, not "
+        "estimated:"
+    )
+    st.table(
+        [
+            {
+                "model": e["model"],
+                "input $/1M": e["input_per_1m"],
+                "output $/1M": e["output_per_1m"],
+                "checked on": e["checked_on"],
+            }
+            for e in pricing.entries()
+        ]
+    )
+    st.caption(
+        "The most recent recorded eval pass cost $0.0078 for 27 model calls "
+        "(docs/evals/baseline-2026-09-04.md); the same pass on gpt-oss-20b "
+        "cost $0.0040 (docs/evals/model-experiment-2026-09-04.md)."
+    )
+
+
+
 def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="Tilsynsagent — review queue", layout="wide")
 
     _sidebar()
 
+    queue_tab, status_tab = st.tabs(["Review queue", "Status"])
+
+    with status_tab:
+        _status_view()
+
+    with queue_tab:
+        _main_queue()
+
+
+def _main_queue() -> None:
     if st.session_state.get("just_resolved"):
         st.success("Run resumed and finished. The escalation is now resolved.")
         del st.session_state["just_resolved"]

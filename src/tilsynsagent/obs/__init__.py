@@ -10,6 +10,7 @@ from tilsynsagent.obs.online import (
     FILING_SAMPLE_RATE,
     OnlineScore,
     record_scores,
+    score_completed_run,
     score_run,
     should_score,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "observability_enabled",
     "record_generation",
     "record_scores",
+    "score_completed_run",
     "score_run",
     "should_score",
     "shutdown",

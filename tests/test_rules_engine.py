@@ -20,7 +20,18 @@ def load_golden():
         return [json.loads(line) for line in f]
 
 
-GOLDEN_CASES = load_golden()
+ALL_CASES = load_golden()
+
+# Escalation-derived cases record what a *person* decided about a case the
+# engine escalated - and the interesting ones are precisely those where the
+# person disagreed with the engine (see review/app.py's append helper). They
+# are therefore not part of the "the engine reproduces every label" check:
+# asserting that would demand the engine already agree with a human override
+# it has never been taught, which is the opposite of what the case records.
+# They are checked separately below, and they still feed the LLM eval suite
+# through evals/cases.py.
+GOLDEN_CASES = [c for c in ALL_CASES if c.get("origin") != "escalation-derived"]
+ESCALATION_DERIVED = [c for c in ALL_CASES if c.get("origin") == "escalation-derived"]
 
 
 @pytest.mark.parametrize("case", GOLDEN_CASES, ids=[c["id"] for c in GOLDEN_CASES])
@@ -42,6 +53,34 @@ def test_golden_dataset_is_100_percent():
         if not ok:
             mismatches.append(case["id"])
     assert mismatches == [], f"engine disagreed with golden labels: {mismatches}"
+
+
+@pytest.mark.parametrize(
+    "case", ESCALATION_DERIVED, ids=[c["id"] for c in ESCALATION_DERIVED] or ["none"]
+)
+def test_escalation_derived_cases_record_a_human_decision(case):
+    """What these cases must hold instead.
+
+    The engine must still *escalate* them - that is what put them in front of
+    a person. What it must not do is claim the person's label as its own: an
+    escalation-derived case carries rule=None (the label came from a human,
+    not a rule) and escalated_rule naming what actually fired, or nothing if
+    the case was NOT_COVERED.
+
+    A case where the engine no longer escalates is a signal worth failing on:
+    either the rule set changed underneath the dataset, or this case is now
+    covered and should be relabelled deliberately rather than left to drift.
+    """
+    assert case["rule"] is None, (
+        f"{case['id']}: 'rule' means 'the rule that produced this label', and this "
+        "label came from a person - the escalating rule belongs in 'escalated_rule'"
+    )
+    assert "escalated_rule" in case
+    decision = apply_rules(case["changed_fields"], case["before"], case["after"])
+    assert decision.outcome.value in ("escalate", "not_covered"), (
+        f"{case['id']}: the engine no longer escalates this case (says "
+        f"{decision.outcome.value!r}) - relabel it deliberately rather than let it drift"
+    )
 
 
 # --- R1: physically impossible records are escalated -------------------------

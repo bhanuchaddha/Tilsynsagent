@@ -43,14 +43,23 @@ def load_all_cases() -> list[dict]:
 
 
 def expected_route(case: dict) -> Literal["file", "escalate", "not_covered"]:
-    """The route a case is expected to take through the graph. For the real
-    34, this is the golden label directly. Synthetic NOT_COVERED cases carry
+    """The route a case is expected to take through the graph. For the
+    founding 34, this is the golden label directly. Synthetic NOT_COVERED cases carry
     label "escalate" (their real-world outcome, since NOT_COVERED always
     escalates - see rules/engine.py's Outcome.NOT_COVERED docstring) but are
     tagged with origin "synthetic-not-covered" so the eval task layer can
     route them through assess() instead of summarise()."""
     if case.get("origin") == "synthetic-not-covered":
         return "not_covered"
+    if case.get("origin") == "escalation-derived":
+        # The route the *graph* takes, which is not the same as the label.
+        # These cases were escalated by the engine and then given a label by a
+        # person - often one the engine disagrees with, which is the whole
+        # reason they are worth keeping. Their expected route is therefore
+        # still "escalate": that is what the system does with them, and what a
+        # route check must compare against. The human's label lives in
+        # case["label"] and is what the *resolution* was, not what the run did.
+        return "escalate"
     return case["label"]
 
 

@@ -168,6 +168,61 @@ def score_run(
     ]
 
 
+def score_completed_run(result, *, record, thread_id: str) -> list[OnlineScore]:
+    """Scores one finished graph invocation against the record it saw.
+
+    Lives here rather than in runner.py because the demo seed drives the same
+    graph and must produce the same scores - a demo that shows tracing but no
+    scoring would be showing a different system from the one that runs
+    unattended.
+
+    Never raises: a scoring failure must not fail a run that has already made
+    and written its decision. Returns the scores it recorded (empty when the
+    run was deduplication, or was sampled out) so a caller can log them.
+    """
+    if not isinstance(result, dict):
+        return []
+
+    outcome_result = result.get("result", {}) or {}
+    interrupts = result.get("__interrupt__")
+    if interrupts:
+        # A paused run: _escalate_node writes the escalation row *before* it
+        # interrupts, so the decision is real and scoreable even though the
+        # graph has not reached END.
+        interrupt_value = getattr(interrupts[0], "value", None) or {}
+        outcome = "escalate"
+        outcome_result = {
+            "escalation_id": interrupt_value.get("escalation_id"),
+            "diff_id": interrupt_value.get("diff_id"),
+        }
+        citation = interrupt_value.get("citation")
+    elif "filing_id" in outcome_result:
+        outcome, citation = "file", record.doklink
+    elif "escalation_id" in outcome_result:
+        outcome, citation = "escalate", record.doklink
+    else:
+        # Deduplication, not a decision - see graph.py's _skip_node.
+        return []
+
+    if not should_score(outcome=outcome, thread_id=thread_id):
+        return []
+
+    scores = score_run(
+        outcome=outcome,
+        rule=result.get("rule"),
+        citation=citation,
+        doklink=record.doklink,
+        result=outcome_result,
+    )
+    record_scores(scores, thread_id=thread_id)
+    for score in scores:
+        if score.value < 1.0:
+            logger.warning(
+                "online score %s failed for thread %s: %s", score.name, thread_id, score.comment
+            )
+    return scores
+
+
 def record_scores(scores: list[OnlineScore], *, thread_id: str) -> None:
     """Attaches scores to the run's Langfuse trace, by session id.
 

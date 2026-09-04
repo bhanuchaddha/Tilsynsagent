@@ -114,17 +114,30 @@ def _run_case(graph, case: dict) -> str:
     before = _record(case, case["before"], versionsnr=1, delnr=delnr)
     after = _record(case, case["after"], versionsnr=2, delnr=delnr)
 
+    # Traced and scored exactly like an unattended run - see obs/online.py's
+    # score_completed_run. A demo that showed tracing but no online scoring
+    # would be demonstrating a different system from the one that runs
+    # unattended, which is the one failure mode a demo must not have.
     thread_before = f"demo-{case['id']}-v1"
     graph.invoke(
         run_input(before, is_test_data=True),
-        config={"configurable": {"thread_id": thread_before}},
+        config=obs.trace_config(
+            {"configurable": {"thread_id": thread_before}},
+            thread_id=thread_before,
+            tags=["demo"],
+        ),
     )
 
     thread_after = f"demo-{case['id']}-v2"
     result = graph.invoke(
         run_input(after, is_test_data=True),
-        config={"configurable": {"thread_id": thread_after}},
+        config=obs.trace_config(
+            {"configurable": {"thread_id": thread_after}},
+            thread_id=thread_after,
+            tags=["demo"],
+        ),
     )
+    obs.score_completed_run(result, record=after, thread_id=thread_after)
 
     interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
     if interrupts:

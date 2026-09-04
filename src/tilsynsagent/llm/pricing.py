@@ -30,6 +30,21 @@ class Pricing:
     def is_priced(self, model: str) -> bool:
         return model in self._models
 
+    def entries(self) -> list[dict]:
+        """Every priced model with its rates and the date it was checked -
+        what the status page publishes. Sorted so the table is stable
+        between renders."""
+        return [
+            {
+                "model": name,
+                "input_per_1m": entry["input_per_1m"],
+                "output_per_1m": entry["output_per_1m"],
+                "checked_on": entry["checked_on"],
+                "source": entry.get("source"),
+            }
+            for name, entry in sorted(self._models.items())
+        ]
+
     def checked_on(self, model: str) -> str | None:
         entry = self._models.get(model)
         return entry["checked_on"] if entry else None

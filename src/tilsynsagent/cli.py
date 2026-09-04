@@ -21,10 +21,16 @@ def main() -> None:
     )
     subparsers.add_parser("reset-demo", help="Delete all demo/test data. Live rows untouched.")
     subparsers.add_parser("review", help="Launch the Streamlit review queue.")
-    args = parser.parse_args()
+    # Unknown args are forwarded to Streamlit by the `review` command (e.g.
+    # --server.port, --server.headless), which is how the UI is launched
+    # non-interactively. Every other command rejects them below.
+    args, extra = parser.parse_known_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv()
+
+    if args.command != "review" and extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
 
     if args.command == "run-once":
         from tilsynsagent.runner import run_once
@@ -57,7 +63,7 @@ def main() -> None:
         import streamlit.web.cli as stcli
 
         app_path = str(Path(__file__).parent / "review" / "app.py")
-        sys.argv = ["streamlit", "run", app_path]
+        sys.argv = ["streamlit", "run", app_path, *extra]
         stcli.main()
 
 
