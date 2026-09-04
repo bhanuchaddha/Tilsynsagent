@@ -40,6 +40,10 @@ it improves any other number.
 5. **Secrets are env-only.** `.env.example` is committed, `.env` is not.
 6. **Baselines get recorded, however bad.** Do not tune before recording the
    first number.
+7. **Every feature ships with demo data and a reset.** Demonstrable on demand,
+   without waiting for the live register to produce the right kind of change.
+   Demo data is marked as such in the database and a reset clears it without
+   touching live run history.
 
 ## Verification
 

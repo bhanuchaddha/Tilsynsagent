@@ -26,7 +26,7 @@ from typing import Literal, TypedDict
 import psycopg
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import get_config
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from tilsynsagent.actions.escalate import escalate_decision
 from tilsynsagent.actions.file import file_decision
@@ -47,6 +47,11 @@ class GraphState(TypedDict, total=False):
     # registered types. Keeping the checkpointed state to plain dicts avoids
     # depending on SubAreaRecord's msgpack registration remaining supported.
     record: dict
+
+    # True only for records fed in by demo/seed.py. Marks the sub_area row
+    # so demo/reset.py can wipe it without touching live run history - see
+    # migrations/003_demo_data.sql. Defaults to False for every real run.
+    is_test_data: bool
 
     # --- detect ---
     sub_area_id: int
@@ -85,10 +90,33 @@ def _sub_area_description(record: SubAreaRecord) -> str:
     return f"{record.kommunenavn or record.komnr}, plan {record.lokplan_id}, sub-area {record.delnr}"
 
 
-def run_input(record: SubAreaRecord) -> dict:
+def run_input(record: SubAreaRecord, *, is_test_data: bool = False) -> dict:
     """The initial state dict for graph.invoke({...}, config=...) - converts
-    the fetched record to the plain-dict form GraphState.record requires."""
-    return {"record": record.to_dict()}
+    the fetched record to the plain-dict form GraphState.record requires.
+
+    is_test_data is only ever True from demo/seed.py - see GraphState's
+    docstring on the field."""
+    return {"record": record.to_dict(), "is_test_data": is_test_data}
+
+
+def resume_run(graph, thread_id: str) -> dict:
+    """Resumes a paused run against its stored thread id (review/app.py, once
+    a person has answered the escalation that paused it).
+
+    _escalate_node has already written the escalation row and its resolution
+    is written separately by review/app.py before this is called - this call
+    exists only to let interrupt() return so the graph reaches END. The value
+    passed to Command(resume=...) is unused by _escalate_node (see its
+    docstring: nothing further happens after the interrupt() call returns).
+    It cannot be None, though: LangGraph's loop only sets its internal
+    resume_is_map flag inside the `resume is not None` branch and reads it
+    unconditionally right after (pregel/_loop.py), so resume=None raises
+    UnboundLocalError before the graph resumes at all. True is passed as an
+    arbitrary non-None placeholder.
+    """
+    return graph.invoke(
+        Command(resume=True), config={"configurable": {"thread_id": thread_id}}
+    )
 
 
 def make_graph(database_url: str | None = None):
@@ -148,7 +176,9 @@ def _detect_node(state: GraphState) -> dict:
     database_url = os.environ["DATABASE_URL"]
     with psycopg.connect(database_url) as conn:
         with conn.transaction():
-            sub_area_id = repo.get_or_create_sub_area(conn, record)
+            sub_area_id = repo.get_or_create_sub_area(
+                conn, record, is_test_data=state.get("is_test_data", False)
+            )
             previous = repo.latest_version(conn, sub_area_id)
             after_version_id = repo.insert_version(conn, sub_area_id, record)
 

@@ -129,10 +129,31 @@ there - the register alone cannot say what moved, only that something did.
 
 ---
 
+## The review queue (Phase 3)
+
+An escalation pauses the run with `interrupt()` and persists its state to
+Postgres. `tilsynsagent review` launches a Streamlit screen
+(`src/tilsynsagent/review/app.py`) over the open escalations: what changed,
+what the agent could not decide, which rule fired or that none did, a link to
+the source document. Answering one writes the resolution
+(`db/repo.insert_escalation_resolution`) and resumes the paused run against
+its stored thread id (`graph.resume_run`) so it runs to completion. A
+resolution can optionally be appended to the golden dataset as a new case
+tagged `escalation-derived` - a manual button, not automatic, so the dataset
+stays a definition of what is correct rather than a record of what the agent
+did.
+
+`tilsynsagent seed-demo` / `reset-demo` (`src/tilsynsagent/demo/`) feed
+hand-labelled golden cases through the real graph as if they had arrived from
+the register, so the review queue can be demonstrated without waiting on the
+live register to produce the right kind of change. Rows they create are
+marked `is_test_data` (migration `003_demo_data.sql`); reset deletes only
+those rows and their LangGraph checkpoints, never live run history.
+
 ## What is not built yet
 
-No evaluation harness, no baseline score, no CI gate, no prompt versioning -
-those are Phase 2 and 3. No UI: the record of what happened is the
-`escalations` and `filings` tables plus the run log. This phase exists so
-those later phases have something real to measure; it does not measure
-itself.
+No evaluation-blocking CI gate, no prompt versioning, no retrieval/grounding
+- those are Phase 5 and 6. No online eval on live (non-golden) runs - Phase
+4. `ignore` is not a route the eval pipeline can score yet: an escalation
+resolved `ignore` through the review screen is deliberately excluded from
+"Add to dataset" until Phase 6 gives it a route.

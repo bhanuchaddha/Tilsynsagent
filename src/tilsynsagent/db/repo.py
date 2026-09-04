@@ -15,7 +15,9 @@ from psycopg.rows import dict_row
 from tilsynsagent.sources.plandata import SubAreaRecord
 
 
-def get_or_create_sub_area(conn: psycopg.Connection, record: SubAreaRecord) -> int:
+def get_or_create_sub_area(
+    conn: psycopg.Connection, record: SubAreaRecord, *, is_test_data: bool = False
+) -> int:
     row = conn.execute(
         "SELECT id FROM sub_areas WHERE lokplan_id = %s AND delnr = %s",
         (record.lokplan_id, record.delnr),
@@ -24,11 +26,11 @@ def get_or_create_sub_area(conn: psycopg.Connection, record: SubAreaRecord) -> i
         return row[0]
     row = conn.execute(
         """
-        INSERT INTO sub_areas (lokplan_id, delnr, komnr, kommunenavn)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO sub_areas (lokplan_id, delnr, komnr, kommunenavn, is_test_data)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (record.lokplan_id, record.delnr, record.komnr, record.kommunenavn),
+        (record.lokplan_id, record.delnr, record.komnr, record.kommunenavn, is_test_data),
     ).fetchone()
     return row[0]
 
@@ -173,6 +175,64 @@ def insert_escalation_resolution(
         (escalation_id, label, reason, rule, resolved_by),
     ).fetchone()
     return row[0]
+
+
+def list_open_escalations(conn: psycopg.Connection) -> list[dict]:
+    """Escalations with no row in escalation_resolutions yet, newest first -
+    the review queue (review/app.py). escalation_resolutions.escalation_id
+    is UNIQUE, so a missing join match is exactly "unresolved"."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT e.id AS escalation_id, e.diff_id, e.what_is_unclear,
+                   e.what_a_person_must_decide, e.citation, e.escalated_at,
+                   d.rule, d.changed_fields, s.kommunenavn, s.komnr, s.lokplan_id, s.delnr
+            FROM escalations e
+            JOIN diffs d ON d.id = e.diff_id
+            JOIN sub_areas s ON s.id = d.sub_area_id
+            LEFT JOIN escalation_resolutions r ON r.escalation_id = e.id
+            WHERE r.id IS NULL
+            ORDER BY e.escalated_at DESC
+            """
+        )
+        return cur.fetchall()
+
+
+def get_escalation_detail(conn: psycopg.Connection, escalation_id: int) -> dict | None:
+    """Everything the review screen needs for one escalation: the diff's
+    before/after versions, the rule (or none, for a NOT_COVERED case handed
+    to assess()), and whether it has already been resolved."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT e.id AS escalation_id, e.diff_id, e.thread_id, e.what_is_unclear,
+                   e.what_a_person_must_decide, e.citation, e.escalated_at,
+                   d.rule, d.rule_set, d.changed_fields, d.before_version_id, d.after_version_id,
+                   s.id AS sub_area_id, s.kommunenavn, s.komnr, s.lokplan_id, s.delnr,
+                   r.id AS resolution_id, r.label AS resolution_label,
+                   r.reason AS resolution_reason, r.resolved_by, r.resolved_at
+            FROM escalations e
+            JOIN diffs d ON d.id = e.diff_id
+            JOIN sub_areas s ON s.id = d.sub_area_id
+            LEFT JOIN escalation_resolutions r ON r.escalation_id = e.id
+            WHERE e.id = %s
+            """,
+            (escalation_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cur.execute(
+            "SELECT * FROM sub_area_versions WHERE id = %s", (row["after_version_id"],)
+        )
+        row["after"] = cur.fetchone()
+        row["before"] = None
+        if row["before_version_id"] is not None:
+            cur.execute(
+                "SELECT * FROM sub_area_versions WHERE id = %s", (row["before_version_id"],)
+            )
+            row["before"] = cur.fetchone()
+        return row
 
 
 def get_watermark(conn: psycopg.Connection) -> tuple[str, list[str]]:
