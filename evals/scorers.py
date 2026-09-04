@@ -117,9 +117,18 @@ def _context_numbers(case: dict) -> set[float]:
     doklink = source.get("document", "")
     numbers |= _numbers_in_text(doklink)
     for key in ("plan_id", "sub_area", "municipality_code"):
-        n = _as_number(source.get(key))
+        value = source.get(key)
+        n = _as_number(value)
         if n is not None:
             numbers.add(n)
+        elif isinstance(value, str):
+            # A digit embedded in a longer label, e.g. sub_area "Delområde 2".
+            # The 2026-08-29 baseline recorded ZL-025 and ZL-027 failing
+            # no_invented_numbers for exactly this: the model states the
+            # sub-area by its full Danish name, and the bare-numeric branch
+            # above only recognises a code like "3B". Naming the sub-area you
+            # were given is faithful citation, not a fabricated figure.
+            numbers |= _numbers_in_text(value)
     return numbers
 
 

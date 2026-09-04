@@ -145,6 +145,24 @@ def run_case(case: dict) -> TaskResult:
     )
 
 
+def resolved_prompts() -> dict[str, str]:
+    """The prompt version each LLM step resolves to right now, for the
+    baseline header. A score is only comparable against another score whose
+    prompt version is also known - see llm/prompts.py on why the registry
+    exists. Recorded the same way and for the same reason as
+    resolved_models(): measured, never assumed."""
+    from tilsynsagent.llm.prompts import (
+        ASSESS_PROMPT_NAME,
+        SUMMARISE_PROMPT_NAME,
+        get_prompt,
+    )
+
+    return {
+        "assess": get_prompt(ASSESS_PROMPT_NAME).label,
+        "summarise": get_prompt(SUMMARISE_PROMPT_NAME).label,
+    }
+
+
 def resolved_models() -> dict[str, str]:
     """The GROQ_MODEL each LLM step actually resolved to, for the baseline
     header - see this module's docstring on why this must be recorded, not

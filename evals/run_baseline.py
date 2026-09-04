@@ -211,7 +211,7 @@ def main() -> None:
         os.environ.pop("LANGFUSE_SECRET_KEY", None)
 
     from evals.cases import load_all_cases
-    from evals.tasks import resolved_models
+    from evals.tasks import resolved_models, resolved_prompts
 
     cases = load_all_cases()
     if args.limit:
@@ -220,6 +220,7 @@ def main() -> None:
     coverage, mismatches = _rule_engine_coverage()
 
     print(f"resolved models: {resolved_models()}", file=sys.stderr)
+    print(f"resolved prompts: {resolved_prompts()}", file=sys.stderr)
     print(f"rule_engine_coverage (GATE): {coverage:.3f}", file=sys.stderr)
     if mismatches:
         print(f"  mismatches: {mismatches}", file=sys.stderr)
@@ -260,6 +261,7 @@ def main() -> None:
 
     output = {
         "resolved_models": resolved_models(),
+        "resolved_prompts": resolved_prompts(),
         "rule_engine_coverage": coverage,
         "rule_engine_mismatches": mismatches,
         "n_cases": len(cases),

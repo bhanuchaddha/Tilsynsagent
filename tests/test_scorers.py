@@ -125,3 +125,46 @@ def test_valid_structured_output_passes_without_error():
 
 def test_valid_structured_output_fails_with_error():
     assert valid_structured_output(CASE, None, error="schema validation failed").value == 0.0
+
+
+# --- regression: the 2026-08-29 baseline's scorer boundary gap -----------
+
+
+def test_no_invented_numbers_allows_a_digit_inside_a_sub_area_label():
+    """ZL-025 and ZL-027 failed this scorer in all three stability passes of
+    the 2026-08-29 baseline, and the baseline itself judged it a scorer gap
+    rather than a model fabrication: both sub-areas are named "Delområde 2" /
+    "Delområde 3", and _context_numbers only allowed a bare numeric sub-area
+    code (e.g. "3B"). Naming the sub-area you were handed is faithful
+    citation. See docs/evals/baseline-2026-08-29.md, "a stable, narrower
+    finding"."""
+    case = {
+        "source": {
+            "document": "https://dokument.plandata.dk/20_1234_abc.pdf",
+            "sub_area": "Delområde 2",
+            "plan_id": 10351067,
+        },
+        "changed_fields": {"bebygpct": {"before": None, "after": 40}},
+        "before": {},
+        "after": {"bebygpct": 40},
+    }
+    assert no_invented_numbers(case, "Delområde 2 now has a density of 40.").value == 1.0
+
+
+def test_no_invented_numbers_still_catches_fabrication_alongside_a_label_digit():
+    """The fix above widens what is allowed, so this pins the boundary: a
+    genuinely invented figure in the same sentence must still fail, or the
+    scorer has been loosened into uselessness."""
+    case = {
+        "source": {
+            "document": "https://dokument.plandata.dk/20_1234_abc.pdf",
+            "sub_area": "Delområde 2",
+            "plan_id": 10351067,
+        },
+        "changed_fields": {"bebygpct": {"before": None, "after": 40}},
+        "before": {},
+        "after": {"bebygpct": 40},
+    }
+    score = no_invented_numbers(case, "Delområde 2 rose to 40 from 999.")
+    assert score.value == 0.0
+    assert "999" in score.comment

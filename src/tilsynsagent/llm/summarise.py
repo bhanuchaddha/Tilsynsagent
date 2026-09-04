@@ -16,18 +16,15 @@ from pydantic import BaseModel, Field
 
 from tilsynsagent import obs
 from tilsynsagent.llm.client import groq_client
+from tilsynsagent.llm.prompts import SUMMARISE_PROMPT_NAME, get_prompt, record_last_prompt
 from tilsynsagent.llm.schema import response_format
 from tilsynsagent.llm.usage import Usage
 
 DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
-SYSTEM_PROMPT = """\
-You write a short, factual record of a change that has already been filed as \
-significant. The decision is made; your job is only to state clearly what \
-changed and why it was filed, citing the rule and the source document. Do not \
-add judgement, speculation, or recommendations - the rule engine already \
-decided this matters. State facts from the record given to you; do not invent \
-detail it does not contain."""
+# The system prompt now lives in the Langfuse prompt registry - see
+# llm/prompts.py. The pinned fallback there is byte-identical to what this
+# constant held before the registry existed.
 
 
 class Summary(BaseModel):
@@ -63,6 +60,8 @@ def summarise(
     model: str = DEFAULT_MODEL,
 ) -> str:
     client = client or groq_client()
+    system = get_prompt(SUMMARISE_PROMPT_NAME)
+    record_last_prompt(system)
     prompt = build_prompt(
         sub_area_description=sub_area_description,
         changed_fields=changed_fields,
@@ -75,7 +74,7 @@ def summarise(
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system.text},
                 {"role": "user", "content": prompt},
             ],
             response_format=response_format(Summary, "summary"),
@@ -88,6 +87,11 @@ def summarise(
             gen.update(
                 input=prompt,
                 output=resp.choices[0].message.content,
+                metadata={
+                    "prompt_name": system.name,
+                    "prompt_version": system.version,
+                    "prompt_source": system.source,
+                },
                 usage_details={
                     "input": usage.prompt_tokens,
                     "output": usage.completion_tokens,

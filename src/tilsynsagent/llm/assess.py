@@ -22,22 +22,18 @@ from pydantic import BaseModel, Field
 
 from tilsynsagent import obs
 from tilsynsagent.llm.client import groq_client
+from tilsynsagent.llm.prompts import ASSESS_PROMPT_NAME, get_prompt
 from tilsynsagent.llm.schema import response_format
+from tilsynsagent.llm.prompts import record_last_prompt
 from tilsynsagent.llm.usage import Usage
 from tilsynsagent.rules.loader import load_not_covered_section
 
 DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
-SYSTEM_PROMPT = """\
-You assess changes to the Danish local-plan register (Plandata.dk) that the \
-written rule set does not cover. You do not decide whether the change is \
-compliant or what should be built. You decide what a person needs to look at, \
-and explain why the register alone cannot settle it.
-
-Ground every statement in the before/after values and the rule set boundary \
-given to you. Do not speculate about intent, and do not invent facts not in \
-the record. If the source document is not available to you, say so rather \
-than guessing its contents - you cite it, you do not read it."""
+# The system prompt now lives in the Langfuse prompt registry - see
+# llm/prompts.py for why, and for the pinned fallback used when Langfuse is
+# unconfigured or unreachable. The fallback text is byte-identical to what
+# this constant held before the registry existed.
 
 
 class Assessment(BaseModel):
@@ -79,6 +75,8 @@ def assess(
 ) -> Assessment:
     """Calls Groq for a case the rule engine returned NOT_COVERED on."""
     client = client or groq_client()
+    system = get_prompt(ASSESS_PROMPT_NAME)
+    record_last_prompt(system)
     prompt = build_prompt(
         sub_area_description=sub_area_description,
         changed_fields=changed_fields,
@@ -89,7 +87,7 @@ def assess(
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system.text},
                 {"role": "user", "content": prompt},
             ],
             response_format=response_format(Assessment, "assessment"),
@@ -102,6 +100,13 @@ def assess(
             gen.update(
                 input=prompt,
                 output=resp.choices[0].message.content,
+                # The prompt version that produced this decision, on the trace
+                # itself - the one rule applied to the prompt, not just the data.
+                metadata={
+                    "prompt_name": system.name,
+                    "prompt_version": system.version,
+                    "prompt_source": system.source,
+                },
                 usage_details={
                     "input": usage.prompt_tokens,
                     "output": usage.completion_tokens,
