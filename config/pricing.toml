@@ -9,3 +9,9 @@ input_per_1m  = 0.15
 output_per_1m = 0.60
 checked_on    = "2026-08-22"
 source        = "https://console.groq.com/docs/model/openai/gpt-oss-120b"
+
+[models."openai/gpt-oss-20b"]
+input_per_1m  = 0.075
+output_per_1m = 0.30
+checked_on    = "2026-09-04"
+source        = "https://console.groq.com/docs/model/openai/gpt-oss-20b"
