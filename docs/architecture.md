@@ -150,10 +150,74 @@ live register to produce the right kind of change. Rows they create are
 marked `is_test_data` (migration `003_demo_data.sql`); reset deletes only
 those rows and their LangGraph checkpoints, never live run history.
 
+## Prompts are versioned artifacts, not string literals
+
+The system prompts live in Langfuse prompt management, not in Python
+(`llm/prompts.py`). A prompt edit changes behaviour as much as a code change
+does but does not look like one in a diff, so three things follow: the
+resolved version is recorded on every trace and every eval result, so "which
+prompt produced this filing?" is answerable after the fact; a rollback is a
+label move rather than a deploy; and a score is comparable only against
+another score whose prompt version is also known.
+
+Every prompt keeps a **pinned local fallback**. When Langfuse is
+unconfigured, unreachable, or has not been seeded, the agent uses that and
+records `source: fallback` rather than a version number that would be a lie.
+An agent that stops deciding because an observability vendor is down has
+traded one failure mode for a worse one. `push_fallbacks()` seeds the
+registry *from* those constants, so the two are identical by construction.
+
+## Two kinds of evaluation
+
+**Offline, against known answers** (`evals/`). 39 hand-labelled cases with a
+correct outcome, scored by pure code - zero LLM-as-judge, because "the judge
+said so" is not a citation. This catches regressions in *changes*.
+
+`evals/gate.py` is what CI runs: a pull request that lowers a protected
+behaviour fails. Thresholds live in a committed `evals/thresholds.json`, so
+relaxing one is a reviewable diff in the pull request that needs it. It calls
+the real model rather than replaying fixtures - the failure it exists to
+catch is a prompt or model change altering what the model produces, which a
+fixture cannot see. Three exit codes: 0 met, 1 regression, **2 inconclusive**
+- a rate limit or transport failure is never a verdict on behaviour, because
+reporting infrastructure as a regression trains people to re-run until green.
+
+**Online, with no known answer** (`obs/online.py`). The eval suite cannot see
+drift in *inputs*: the register keeps producing shapes of transition nobody
+has labelled, and a system scoring 1.000 offline can still be degrading in
+production. So three scorers check structural properties of live decisions
+against the record the agent itself saw - the filed decision cites that
+record's own document; a case no rule covered escalated rather than being
+acted on; the run wrote only what its outcome permits. Every escalation is
+scored; filings are sampled, deterministically in the thread id so a resumed
+run cannot produce two score histories for one decision.
+
+`obs/drift.py` judges a rolling window against thresholds committed *before*
+they fire, because after an incident every threshold is negotiable. Three
+states, not two: "insufficient evidence" is never reported as healthy.
+
+## Escalation-derived cases are a different kind of object
+
+A resolution added to the golden dataset records what a *person* decided
+about a case the engine escalated - and the interesting ones are exactly
+those where the person disagreed with the engine. So `rule` is null (no rule
+produced this label) and the escalating rule is recorded under
+`escalated_rule`. Its expected *route* stays `escalate` - that is what the
+system did - while `label` holds what the person decided. Conflating the two
+would score the system as wrong every time a human overrode it, turning the
+review loop into a permanent self-inflicted regression.
+
 ## What is not built yet
 
-No evaluation-blocking CI gate, no prompt versioning, no retrieval/grounding
-- those are Phase 5 and 6. No online eval on live (non-golden) runs - Phase
-4. `ignore` is not a route the eval pipeline can score yet: an escalation
-resolved `ignore` through the review screen is deliberately excluded from
-"Add to dataset" until Phase 6 gives it a route.
+**No retrieval or grounding** (Phase 6). The agent receives a link to the
+source plan document on every record, cites it, and never opens it.
+Consequently `ignore` is not a route the eval pipeline can score: an
+escalation resolved `ignore` through the review screen is deliberately
+excluded from "Add to dataset" until grounding gives it a route.
+
+**No public URL** (Phase 8). The status page exists inside the review app;
+nothing is published.
+
+**No automatic response to drift.** `obs/drift.py` can say *degraded*;
+nothing acts on that without a person. Likewise the rollback is executed by
+an operator, not triggered by a threshold.
