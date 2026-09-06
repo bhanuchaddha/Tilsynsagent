@@ -149,6 +149,11 @@ broken URL fails the suite rather than skipping.
 
 ## Stage 3 — the semantic scorer (improvement 8's hard part)
 
+> **Read [`improvements-v2.md`](improvements-v2.md) entry 9 before starting
+> this stage.** It argues the semantic scorer should run as a Langfuse-side
+> evaluator rather than in-process, which changes what gets built here. That
+> question is open and should be settled first.
+
 An online scorer that catches **citation does not support conclusion**.
 
 Everything existing is structural — the quote is real, the quote is verbatim.
