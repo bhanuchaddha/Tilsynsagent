@@ -193,7 +193,7 @@ scored; filings are sampled, deterministically in the thread id so a resumed
 run cannot produce two score histories for one decision.
 
 `obs/drift.py` judges a rolling window against thresholds committed *before*
-they fire, because after an incident every threshold is negotiable. Three
+they fire, because after a failure every threshold is negotiable. Three
 states, not two: "insufficient evidence" is never reported as healthy.
 
 ## Escalation-derived cases are a different kind of object

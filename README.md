@@ -66,7 +66,7 @@ cover, is failing even when its output happens to be right.
 ```
 
 The escalation branch was built at the same time as the filing branch, not added
-after the first incident. That ordering is deliberate: an escalation path
+after the first alert fired. That ordering is deliberate: an escalation path
 retrofitted onto a system that was designed to always produce an answer tends to
 be one that never fires.
 
@@ -85,7 +85,7 @@ set can reach on its own - see [`docs/rules.md`](docs/rules.md) on why.
 
 **Tracing.** Every run, every tool call, every decision, every token, in
 Langfuse Cloud. Free tier retains data 30 days, which is why anything that
-needs to outlive that - a baseline, a regression, an incident - gets
+needs to outlive that - a baseline, a regression, an alert - gets
 committed into [`docs/evals/`](docs/evals/) at the moment it happens, not
 just linked to. Langfuse is MIT-licensed and self-hostable if the free tier
 is outgrown, which is also the path to EU data residency for a Danish

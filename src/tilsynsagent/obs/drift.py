@@ -1,6 +1,6 @@
 """Drift detection: deciding, in advance, what "degraded" means.
 
-**The point of writing this down before it happens.** After an incident,
+**The point of writing this down before it happens.** After a failure,
 every threshold is negotiable — there is always a reason the number that just
 fired was too strict. A definition agreed while nothing is wrong is the only
 kind that survives the first time it is inconvenient. So the thresholds in
