@@ -66,8 +66,17 @@ def run_once(database_url: str | None = None) -> dict:
             for record in store.fetch_new(client):
                 counts["fetched"] += 1
                 thread_id = _thread_id_for(record)
+                # Every real run is tagged "grounded": whether the ground node
+                # is reached depends on the rule engine's verdict, which is not
+                # known until the run happens, and a tag cannot be added after
+                # the trace is written. Over-tagging costs nothing - the judge
+                # and the annotation queue both look for a grounding on the
+                # trace before acting - whereas under-tagging would hide the
+                # decisions that most need looking at.
                 config = obs.trace_config(
-                    {"configurable": {"thread_id": thread_id}}, thread_id=thread_id
+                    {"configurable": {"thread_id": thread_id}},
+                    thread_id=thread_id,
+                    tags=["grounded"],
                 )
                 try:
                     result = graph.invoke(run_input(record), config=config)

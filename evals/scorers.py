@@ -187,12 +187,45 @@ def states_both_values(case: dict, output: str) -> Score:
     )
 
 
-def did_not_read_the_document(case: dict, output: str) -> Score:
-    """The PDF boundary in docs/rules.md ("the agent works from the register
-    and cites the document, it does not interpret it") is held, not merely
-    instructed. A keyword heuristic - stated as a floor, not a proof: it
-    catches an explicit claim to have read prose inside the PDF, but cannot
-    catch a model that read the PDF and phrased it carefully."""
+# Routes on which claiming to have read the document is *correct* rather than
+# a boundary violation. The ground node's whole job is to read clauses out of
+# the PDF and quote them, so its output says "the document states" by design.
+UNGROUNDED_ROUTES = frozenset({"file", "escalate", "not_covered"})
+
+
+def did_not_read_the_document(case: dict, output: str, *, route: str | None = None) -> Score:
+    """The PDF boundary in docs/rules.md is held on the routes that still have
+    one - a keyword heuristic, stated as a floor rather than a proof.
+
+    **This scorer is route-scoped, and that scoping is the whole point.**
+    It was written when no code path in this system opened a PDF: the agent
+    worked from the register and cited the document without reading it, so an
+    output claiming otherwise was evidence the model had invented content.
+
+    Grounding made that claim true on one route. A grounded decision quotes a
+    clause out of the document; saying so is not a violation, it is the
+    deliverable. Applying this scorer there would score correct behaviour at
+    0.0 against a threshold pinned at 1.0, and CI would go red looking like a
+    model regression while the actual fault was a scorer whose premise had
+    expired.
+
+    It is scoped rather than deleted because on every *other* route the
+    premise still holds exactly as before. The ungrounded paths - a
+    rule-decided filing, a rule-decided escalation, an assess() call - still
+    have no access to the PDF's prose, and a claim to have read it there is
+    still the fabrication this was built to catch. Deleting it would trade a
+    real check for the convenience of not having to think about which route
+    an output came from.
+
+    ``route=None`` applies the check, so a caller that has not thought about
+    routes gets the stricter behaviour rather than a silent pass.
+    """
+    if route is not None and route not in UNGROUNDED_ROUTES:
+        return Score(
+            "did_not_read_the_document",
+            1.0,
+            f"not applicable on the {route!r} route - grounded output quotes the document by design",
+        )
     output_lower = output.lower()
     hit = next((p for p in _DOCUMENT_READING_PHRASES if p in output_lower), None)
     if hit:
@@ -219,3 +252,23 @@ ALL_SCORERS = (
     states_both_values,
     did_not_read_the_document,
 )
+
+# Scorers whose verdict depends on which route produced the output. Kept as an
+# explicit set rather than inspected from each function's signature: which
+# scorers are route-sensitive is a statement about what they mean, and it
+# should be readable here rather than inferred from introspection.
+ROUTE_SCOPED_SCORERS = frozenset({did_not_read_the_document})
+
+
+def score_all(case: dict, output: str, *, route: str | None = None) -> list[Score]:
+    """Every scorer, applied to one output, with the route where it matters.
+
+    The single place run_baseline's two modes (local and Langfuse experiment)
+    both call, so a route-scoped scorer cannot be correct in one and wrong in
+    the other - the divergence that would otherwise show up as CI and the
+    Langfuse UI disagreeing about the same run.
+    """
+    return [
+        scorer(case, output, route=route) if scorer in ROUTE_SCOPED_SCORERS else scorer(case, output)
+        for scorer in ALL_SCORERS
+    ]

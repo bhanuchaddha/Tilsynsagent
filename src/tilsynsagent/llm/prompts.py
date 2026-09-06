@@ -52,6 +52,7 @@ CACHE_TTL_SECONDS = 60
 
 ASSESS_PROMPT_NAME = "tilsynsagent-assess-system"
 SUMMARISE_PROMPT_NAME = "tilsynsagent-summarise-system"
+GROUND_PROMPT_NAME = "tilsynsagent-ground-system"
 
 
 # The pinned defaults. These are the exact strings that were in assess.py and
@@ -95,6 +96,61 @@ it with a description such as "the plan document", "the source PDF", or "the \
 attached document", and never shorten, reformat, or omit it. A summary \
 without the literal URL is unusable, because the reader cannot get back to \
 what justified the decision.""",
+    # The grounding prompt. This is the only prompt in the registry whose
+    # output leads to an autonomous decision with no person in the path, so
+    # two things in it are load-bearing rather than stylistic:
+    #
+    # 1. **The abstention instruction.** "can_decide: false" must read as the
+    #    correct answer, not as a failure. A model that feels obliged to
+    #    produce a decision will find a clause that looks relevant and quote
+    #    it, which is precisely the failure the human-in-the-loop path exists
+    #    to prevent. Abstaining escalates, which costs a person five minutes.
+    #    Guessing produces an untraceable autonomous decision, which costs the
+    #    project its one rule.
+    # 2. **The verbatim-quote requirement.** obs/grounded.py's
+    #    clause_is_verbatim compares the returned quote to the clause text
+    #    with only whitespace and case normalised - a quote that "tidies"
+    #    8,5 to 8.5 fails. That scorer is what makes a grounded decision
+    #    checkable by code rather than by trust, and demo 1 removes this
+    #    paragraph on purpose to show the scorer catching it.
+    GROUND_PROMPT_NAME: """\
+You are reading numbered clauses from a Danish local plan (lokalplan) to \
+settle one question about a change to the plan register that the written \
+rule set does not cover: does the reader now see something on this land that \
+they could not see before?
+
+You are given the change (before -> after values from the register) and a \
+small number of numbered clauses retrieved from the plan document itself.
+
+Decide one of three things:
+
+- **file** - a clause you can quote governs the changed field and shows the \
+change is something a reader of this land would want to know about.
+- **ignore** - a clause you can quote governs the changed field and shows \
+there is nothing new for a reader to see. This is a positive claim backed by \
+a clause, not a shrug.
+- **cannot decide** - set can_decide to false.
+
+Set can_decide to false whenever no clause you were given actually governs \
+the changed field. That is the correct answer, not a failure: the case then \
+goes to a person, which is what should happen when the document does not \
+settle it. Do not stretch a clause that is merely nearby, merely about the \
+same building, or merely plausible. If the clauses you were given are about \
+something else, say so by abstaining.
+
+When you can decide, both of these are required:
+
+1. **clause_id** must be the number of a clause you were actually given \
+(for example "6.3"). Never a clause number you did not see.
+2. **clause_quote** must be copied character for character out of that \
+clause - the sentence that settles the question, and nothing you have \
+rewritten. Do not correct spelling, do not convert a Danish decimal comma \
+(8,5) to a point (8.5), do not expand an abbreviation, do not translate. A \
+quote that has been tidied is not a quote, and a reader checking your \
+decision against the document will not find it.
+
+Never decide from the register values alone. If the clauses do not say it, \
+you do not know it.""",
 }
 
 

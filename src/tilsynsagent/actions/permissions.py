@@ -27,9 +27,27 @@ class ToolPermission:
     # underlying function could technically reach it.
     writable_tables: frozenset[str]
     # Outcome values this tool may record on a diff. file.py may only ever
-    # write outcome='file'; escalate.py only outcome='escalate'. Neither may
-    # write 'ignore' - ignoring is the absence of a write tool call, not a
-    # tool call with that argument.
+    # write outcome='file'; escalate.py only outcome='escalate'.
+    #
+    # Neither of those two may write 'ignore', and the reason has changed
+    # since this was written. It used to read: "ignoring is the absence of a
+    # write tool call, not a tool call with that argument." That was true
+    # while every decision came from the rule layer, which never opens the
+    # source document and therefore can only ever ignore by declining to act
+    # - an absence, with nothing to audit.
+    #
+    # ground.py broke that premise, deliberately. A grounded ignore is a
+    # positive claim backed by a clause the model quoted out of the document
+    # ("6.3 says the reader sees nothing new here"), written to the
+    # groundings table where it can be checked against the document by code.
+    # That is the opposite of an absence: it is the most heavily evidenced
+    # decision this system makes.
+    #
+    # So the ban was not loosened - it was scoped. 'ignore' remains
+    # unwritable by file.py and escalate.py, which still have no way to
+    # justify it. It is writable only by GROUND_PERMISSION, and only along
+    # with a clause id and a verbatim quote (actions/ground.py refuses the
+    # write without both).
     allowed_outcomes: frozenset[str]
     # Max calls in a single run. A run that would exceed this stops and
     # escalates rather than continuing - see RunBudget below.
@@ -47,6 +65,23 @@ ESCALATE_PERMISSION = ToolPermission(
     name="escalate",
     writable_tables=frozenset({"escalations"}),
     allowed_outcomes=frozenset({"escalate"}),
+    max_calls_per_run=200,
+)
+
+# The grounded-decision tool. The only permission in this file that may write
+# 'ignore', and the only one whose decisions no person reviews - see the
+# note on allowed_outcomes above for why those two facts belong together.
+#
+# It writes to groundings *and* to the table its outcome implies (filings for
+# a grounded file; nothing further for a grounded ignore, whose whole record
+# is the grounding row). 'escalate' is absent from allowed_outcomes on
+# purpose: a grounding that cannot decide never calls this tool at all, it
+# routes to escalate.py, so there is exactly one code path to a person and it
+# is the same one that existed before grounding.
+GROUND_PERMISSION = ToolPermission(
+    name="ground",
+    writable_tables=frozenset({"groundings", "filings"}),
+    allowed_outcomes=frozenset({"file", "ignore"}),
     max_calls_per_run=200,
 )
 

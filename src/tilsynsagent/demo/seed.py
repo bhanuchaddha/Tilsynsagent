@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 from langgraph.types import Interrupt
 
 from tilsynsagent import obs
+from tilsynsagent.demo.documents import build_document, doklink_for
 from tilsynsagent.graph import make_graph, run_input
 from tilsynsagent.sources.plandata import SubAreaRecord
 
@@ -63,8 +64,13 @@ DEMO_CASE_IDS = [
     "ZL-004", "ZL-005", "ZL-009", "ZL-024",
     # escalate: R1 (impossible record), R4 (value lost)
     "ZL-001", "ZL-002", "ZL-013", "ZL-016",
-    # escalate: rules silent, model looks (synthetic NOT_COVERED set)
-    "NC-001", "NC-002",
+    # rules silent -> assess, then ground. The whole not-covered set, not a
+    # pair of it: grounding is a model decision and it abstains on some of
+    # these, correctly. Two cases can therefore both abstain and leave a demo
+    # with no grounded decision at all to show, which is the one thing a demo
+    # must not do. Five reliably produces some of each, and the mix of
+    # grounded and abstained is itself the honest picture.
+    "NC-001", "NC-002", "NC-003", "NC-004", "NC-005",
 ]
 
 
@@ -76,7 +82,9 @@ def _demo_lokplan_id(case_id: str) -> int:
     return DEMO_LOKPLAN_BASE + int(digest[:8], 16) % 1_000_000
 
 
-def _record(case: dict, version: dict, *, versionsnr: int, delnr: str) -> SubAreaRecord:
+def _record(
+    case: dict, version: dict, *, versionsnr: int, delnr: str, doklink: str | None = None
+) -> SubAreaRecord:
     lokplan_id = _demo_lokplan_id(case["id"])
     return SubAreaRecord(
         feature_id=f"demo.{case['id']}.v{versionsnr}",
@@ -92,7 +100,11 @@ def _record(case: dict, version: dict, *, versionsnr: int, delnr: str) -> SubAre
         bebygpct=version.get("bebygpct"),
         zonestatus=version.get("zonestatus"),
         anvendelsegenerel=version.get("anvendelsegenerel"),
-        doklink=case["source"].get("document"),
+        # A demo document when one was built for this case, otherwise the
+        # case's real doklink. Both are fetched by the same code; the demo
+        # one is a file:// URL, which documents/cache.py accepts precisely
+        # so the demo exercises the real fetch/extract/split path.
+        doklink=doklink or case["source"].get("document"),
     )
 
 
@@ -106,13 +118,13 @@ def _as_datoopdt(updated: str | None) -> str:
     return f"{updated}T00:00:00.000Z"
 
 
-def _run_case(graph, case: dict) -> str:
+def _run_case(graph, case: dict, *, doklink: str | None = None) -> str:
     """Feeds one case's before version, then its after version, through the
     real graph. Returns the outcome reached: "filed", "escalated", or
     "error"."""
     delnr = "demo"
-    before = _record(case, case["before"], versionsnr=1, delnr=delnr)
-    after = _record(case, case["after"], versionsnr=2, delnr=delnr)
+    before = _record(case, case["before"], versionsnr=1, delnr=delnr, doklink=doklink)
+    after = _record(case, case["after"], versionsnr=2, delnr=delnr, doklink=doklink)
 
     # Traced and scored exactly like an unattended run - see obs/online.py's
     # score_completed_run. A demo that showed tracing but no online scoring
@@ -129,12 +141,18 @@ def _run_case(graph, case: dict) -> str:
     )
 
     thread_after = f"demo-{case['id']}-v2"
+    # Tagged "grounded" whenever this case can reach the ground node at all -
+    # the LLM judge (docs/judge-configuration.md) filters on exactly this tag,
+    # and obs/annotation.py walks traces by it to build the queue. A grounded
+    # decision on an untagged trace is invisible to both, which would leave
+    # the only unreviewed decisions with no judge and no queue.
+    tags = ["demo", "grounded"] if doklink else ["demo"]
     result = graph.invoke(
         run_input(after, is_test_data=True),
         config=obs.trace_config(
             {"configurable": {"thread_id": thread_after}},
             thread_id=thread_after,
-            tags=["demo"],
+            tags=tags,
         ),
     )
     obs.score_completed_run(result, record=after, thread_id=thread_after)
@@ -146,6 +164,16 @@ def _run_case(graph, case: dict) -> str:
         return "escalated"
 
     outcome_result = result.get("result", {}) if isinstance(result, dict) else {}
+    if "grounding_id" in outcome_result:
+        grounded_outcome = result.get("grounded_outcome") or "file"
+        logger.info(
+            "seed %s -> grounded %s on clause %s (diff %s)",
+            case["id"],
+            grounded_outcome,
+            result.get("grounded_clause_id"),
+            outcome_result["diff_id"],
+        )
+        return f"grounded_{grounded_outcome}"
     if "filing_id" in outcome_result:
         logger.info("seed %s -> filed (diff %s)", case["id"], outcome_result["diff_id"])
         return "filed"
@@ -156,8 +184,21 @@ def _run_case(graph, case: dict) -> str:
     return "error"
 
 
-def seed_demo(database_url: str | None = None, case_ids: list[str] | None = None) -> dict:
-    """Runs the demo cases through the real graph. Returns counts."""
+def seed_demo(
+    database_url: str | None = None,
+    case_ids: list[str] | None = None,
+    *,
+    template: str | None = "standard",
+) -> dict:
+    """Runs the demo cases through the real graph. Returns counts.
+
+    ``template`` selects which synthetic plan document each demo case is
+    given: "standard" (clauses production can split) or "drifted" (a
+    numbering shape it cannot - see demo/documents.py). Pass None to use each
+    case's real plandata.dk doklink instead, which is slower (real documents
+    are ~8 MB) and depends on the network, but is the honest path for showing
+    that grounding works on real documents rather than only on ours.
+    """
     from evals.cases import load_all_cases
 
     database_url = database_url or os.environ["DATABASE_URL"]
@@ -169,12 +210,18 @@ def seed_demo(database_url: str | None = None, case_ids: list[str] | None = None
     if missing:
         logger.warning("seed cases not found in golden dataset, skipping: %s", missing)
 
-    counts = {"filed": 0, "escalated": 0, "error": 0}
+    counts = {"filed": 0, "escalated": 0, "grounded_file": 0, "grounded_ignore": 0, "error": 0}
     graph, saver_cm = make_graph(database_url)
     try:
         graph.checkpointer.setup()
         for case in cases:
-            outcome = _run_case(graph, case)
+            doklink = None
+            if template is not None:
+                path = build_document(
+                    plan_id=_demo_lokplan_id(case["id"]), template=template
+                )
+                doklink = doklink_for(path)
+            outcome = _run_case(graph, case, doklink=doklink)
             counts[outcome] = counts.get(outcome, 0) + 1
     finally:
         # flush(), not shutdown(): shutdown() stops Langfuse's background

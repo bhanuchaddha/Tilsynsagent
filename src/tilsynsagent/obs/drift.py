@@ -26,6 +26,7 @@ measured on live traffic with no golden case involved.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,41 @@ DEGRADED: dict[str, float] = {
     # Also structural. A run that wrote both a filing and an escalation, or
     # neither, is a bug rather than a quality drop.
     "stayed_in_tool_surface": 1.0,
+
+    # --- Grounded decisions: the only ones no person reviews. ---
+    #
+    # These thresholds are written here *before the first grounded run ever
+    # executes*, which is this module's entire discipline. Agreeing what
+    # "degraded" means while nothing is wrong is the only kind of agreement
+    # that survives the first time it is inconvenient - and grounding is
+    # exactly where that temptation will arrive, because a threshold that
+    # fires is a threshold standing between a shipped decision and a reader.
+
+    # A cited clause the agent was never shown is a fabrication, full stop -
+    # not a quality gradient. Code decides this against a list, so anything
+    # below 1.0 means the model invented a clause number and the system
+    # recorded it as a decision.
+    "clause_id_exists": 1.0,
+
+    # The quote must be findable in the document. Not 1.0, and the gap is
+    # deliberate: PDF text extraction is genuinely lossy at column and page
+    # boundaries, so a real quote can occasionally fail to match through no
+    # fault of the model. 0.95 tolerates that; it does not tolerate a model
+    # that has started paraphrasing, which shows up as a rate in the 0.7s.
+    # This is the scorer demo 1 breaks on purpose.
+    "clause_is_verbatim": 0.95,
+
+    # The weakest of the grounded scorers and the loosest threshold, honestly
+    # so: it is a keyword floor, and Danish plan clauses phrase the same
+    # restriction many ways. A rate below 0.85 means quotes have stopped
+    # being about the field that changed, which is a retrieval problem rather
+    # than a generation one.
+    "quote_mentions_the_changed_field": 0.85,
+
+    # Structural, like escalated_when_uncovered: a run that could not ground
+    # a case and acted anyway has leaked past the one code path that leads to
+    # a person. There is no acceptable rate for that other than 1.0.
+    "abstained_when_ungrounded": 1.0,
 }
 
 
@@ -164,6 +200,35 @@ def fetch_windows(*, window_size: int = WINDOW_SIZE) -> dict[str, ScorerWindow]:
         return {}
 
 
+def _push_worthy(verdict: DriftVerdict) -> set[str]:
+    """Which failing scorers are worth putting in front of a person.
+
+    All of them, currently - but expressed as a function rather than inlined
+    because the annotation queue's value depends entirely on not containing
+    everything (obs/annotation.py), and the day a scorer starts firing on
+    noise this is where it gets excluded, visibly.
+    """
+    return set(verdict.failing_scorers)
+
+
+def _push_failing_traces(scorer: str) -> None:
+    """Puts the traces that failed this scorer into the annotation queue.
+
+    Never raises, and a no-op without Langfuse keys - see obs/annotation.py.
+    A drift verdict must still be reported even if the queue is unreachable;
+    the alert file is the durable artefact and the queue is a convenience on
+    top of it.
+    """
+    try:
+        from tilsynsagent.obs.annotation import push_failing_traces
+
+        pushed = push_failing_traces(scorer=scorer)
+        if pushed:
+            print(f"queued {len(pushed)} failing trace(s) for annotation")
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning("failing traces for %s could not be queued: %s", scorer, exc)
+
+
 def main() -> int:
     """`python -m tilsynsagent.obs.drift` prints the current verdict.
 
@@ -180,6 +245,27 @@ def main() -> int:
         print(line)
     print()
     print(f"status: {verdict.status}")
+
+    if verdict.is_degraded:
+        # The alert is written *here*, at the moment the verdict is reached,
+        # rather than by whatever cron invoked this. A degraded verdict that
+        # only exists as an exit code is a verdict nobody can read next month
+        # - see obs/alerts.py on why the record has to outlive Langfuse's
+        # 30-day retention.
+        from tilsynsagent.obs.alerts import business_alert
+
+        for name in verdict.failing_scorers:
+            window = windows.get(name)
+            path = business_alert(
+                scorer=name,
+                rate=window.pass_rate if window else 0.0,
+                minimum=DEGRADED[name],
+                window_size=window.n if window else 0,
+                queue_url=os.environ.get("LANGFUSE_QUEUE_URL"),
+            )
+            print(f"alert written: {path}")
+            if window and name in _push_worthy(verdict):
+                _push_failing_traces(name)
 
     from tilsynsagent import obs
 

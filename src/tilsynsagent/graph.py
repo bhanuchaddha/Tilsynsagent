@@ -1,13 +1,29 @@
 """The LangGraph state graph wiring fetch -> detect -> classify -> (file |
 escalate) together, one thread per sub-area diff.
 
-Flow (docs/plan, Phase 1):
+Flow:
 
-    fetch -> detect -> classify -> covered     -> decide (code) -> file -> summarise
-                                 -> not covered -> assess (LLM)  -> escalate -> interrupt()
+    detect -> decide (code) -+- file ------------------------------> file -> END
+                             +- escalate (R1/R4/...) --------------> escalate -> interrupt()
+                             +- not_covered -> assess -> ground -+- grounded file   -> END
+                                                                 +- grounded ignore -> END
+                                                                 +- cannot ground   -> escalate
 
-fetch, detect, classify and decide are deterministic Python. assess and
-summarise are the model. Escalation calls interrupt() inside the escalate
+detect and decide are deterministic Python. assess, ground and summarise are
+the model.
+
+**The ground node is placed after assess, not instead of it.** assess's
+``what_is_unclear`` is what a person reads when grounding abstains, and
+_escalate_node already depends on it. Grounding is therefore purely additive:
+a record that would have escalated before still escalates, with the same
+explanation, unless the document settles it.
+
+**Grounding is the only path to an autonomous decision on an uncovered
+case,** and the only path that can produce outcome 'ignore'. It widens the
+not-covered branch and nothing else - R1 (an internally inconsistent record)
+and R4 (a value the register lost) escalate before this node is reached,
+because no document can say whether the register transposed two numbers or
+why it dropped a value. Escalation calls interrupt() inside the escalate
 node, which pauses the graph and persists its state to Postgres via
 PostgresSaver until a person resolves it with Command(resume=...).
 
@@ -30,10 +46,18 @@ from langgraph.types import Command, interrupt
 
 from tilsynsagent.actions.escalate import escalate_decision
 from tilsynsagent.actions.file import file_decision
+from tilsynsagent.actions.ground import ground_decision
 from tilsynsagent.actions.permissions import RunBudget
 from tilsynsagent.db import repo
 from tilsynsagent.detect import diff_versions
+from tilsynsagent.documents import (
+    extract_text,
+    fetch_document,
+    retrieve_for_fields,
+    split_clauses,
+)
 from tilsynsagent.llm.assess import assess
+from tilsynsagent.llm.ground import ground
 from tilsynsagent.llm.summarise import summarise
 from tilsynsagent.llm.usage import take_last_usage
 from tilsynsagent.rules.engine import RULE_SET_ID, Outcome, apply_rules
@@ -74,6 +98,28 @@ class GraphState(TypedDict, total=False):
     # --- assess (only when the rule engine did not cover the case) ---
     assessment_what_is_unclear: str
     assessment_what_a_person_must_decide: str
+
+    # --- ground (only when assess ran, i.e. the rule engine did not cover
+    # the case). Every field here is a plain type for the msgpack reason on
+    # `record` above - no dataclasses, no None-vs-missing subtleties that a
+    # checkpoint round-trip could lose. ---
+    #
+    # Document layer, recorded whether or not grounding succeeded: a run that
+    # could not read its document is the most important kind to be able to
+    # explain later, and "the fetch 404'd" and "the model abstained" are
+    # different failures with different fixes.
+    document_available: bool
+    document_error: str
+    document_page_count: int
+    document_cache_hit: bool
+    retrieved_clause_ids: list[str]
+    # Grounding outcome. `grounded` False means the record escalates exactly
+    # as it would have before this node existed.
+    grounded: bool
+    grounded_outcome: str  # "file" | "ignore" | "" when not grounded
+    grounded_clause_id: str
+    grounded_clause_quote: str
+    grounded_reasoning: str
 
     # --- LLM usage, one entry per model call made this run (plain dicts -
     # see the msgpack note on `record` above; Usage.to_dict() produces this
@@ -137,8 +183,10 @@ def make_graph(database_url: str | None = None):
     builder.add_node("detect", _detect_node)
     builder.add_node("decide", _decide_node)
     builder.add_node("assess", _assess_node)
+    builder.add_node("ground", _ground_node)
     builder.add_node("file", _file_node)
     builder.add_node("escalate", _escalate_node)
+    builder.add_node("grounded", _grounded_node)
     builder.add_node("skip", _skip_node)
 
     builder.add_edge(START, "detect")
@@ -152,8 +200,14 @@ def make_graph(database_url: str | None = None):
         _route_after_decide,
         {"file": "file", "escalate": "escalate", "assess": "assess"},
     )
-    builder.add_edge("assess", "escalate")
+    builder.add_edge("assess", "ground")
+    builder.add_conditional_edges(
+        "ground",
+        _route_after_ground,
+        {"grounded": "grounded", "escalate": "escalate"},
+    )
     builder.add_edge("file", END)
+    builder.add_edge("grounded", END)
     builder.add_edge("escalate", END)
     builder.add_edge("skip", END)
 
@@ -297,6 +351,179 @@ def _assess_node(state: GraphState) -> dict:
     }
 
 
+def _ground_node(state: GraphState) -> dict:
+    """Reads the source document and asks whether a clause settles the case.
+
+    This is the node the whole phase exists for: the first place the agent
+    reaches a decision with no person in the path.
+
+    It makes no writes. Every write happens in _grounded_node or
+    _escalate_node, so this node is safely re-runnable, and the decision to
+    act is separated from the decision about what is true - the same
+    separation _decide_node and _file_node already have.
+
+    Four ways to reach "cannot ground", all of which escalate and all of
+    which are recorded distinguishably in state:
+
+    1. The record has no doklink at all - a source-data gap.
+    2. The fetch failed (404, timeout, over the size ceiling).
+    3. The document yielded no clauses, or none matching the changed fields -
+       retrieval abstained.
+    4. The model abstained, or returned a decision without checkable
+       evidence (Grounding.is_decided).
+
+    Only the fourth costs a model call. The first three are decided in code,
+    which is deliberate: a run that cannot read its document must not spend
+    tokens discovering that.
+    """
+    record = SubAreaRecord.from_dict(state["record"])
+    doklink = record.doklink or ""
+    not_grounded = {
+        "grounded": False,
+        "grounded_outcome": "",
+        "grounded_clause_id": "",
+        "grounded_clause_quote": "",
+        "grounded_reasoning": "",
+        "retrieved_clause_ids": [],
+        "document_page_count": 0,
+        "document_cache_hit": False,
+    }
+
+    if not doklink:
+        return {
+            **not_grounded,
+            "document_available": False,
+            "document_error": "record has no doklink - nothing to ground against",
+        }
+
+    fetched = fetch_document(doklink)
+    if not fetched.ok:
+        return {
+            **not_grounded,
+            "document_available": False,
+            "document_error": fetched.error or "document could not be fetched",
+        }
+
+    extracted = extract_text(fetched.content)
+    if not extracted.ok:
+        return {
+            **not_grounded,
+            "document_available": False,
+            "document_cache_hit": fetched.cache_hit,
+            "document_page_count": extracted.page_count,
+            "document_error": extracted.error or "document text could not be extracted",
+        }
+
+    clauses = split_clauses(extracted.text)
+    retrieved = retrieve_for_fields(clauses, state["changed_fields"])
+    document_facts = {
+        "document_available": True,
+        "document_error": "",
+        "document_page_count": extracted.page_count,
+        "document_cache_hit": fetched.cache_hit,
+        "retrieved_clause_ids": [c.clause_id for c in retrieved],
+    }
+
+    if not retrieved:
+        # Retrieval abstained. Not an error: the corpus probe found real
+        # documents whose numbering this splitter does not recognise, and
+        # real changes no clause speaks to. Escalating is correct, and it
+        # costs no model call.
+        return {
+            **not_grounded,
+            **document_facts,
+            "document_error": (
+                f"no clause in the document ({len(clauses)} found) matches the changed fields "
+                f"{sorted(state['changed_fields'])}"
+            ),
+        }
+
+    result = ground(
+        sub_area_description=_sub_area_description(record),
+        changed_fields=state["changed_fields"],
+        clauses=retrieved,
+        doklink=doklink,
+    )
+    usage = take_last_usage()
+    usage_entry = {"usage": [usage.to_dict()]} if usage else {}
+
+    if not result.is_decided:
+        return {
+            **not_grounded,
+            **document_facts,
+            **usage_entry,
+            # The model's own words on what the clauses did not settle. This
+            # is what a person sees alongside assess()'s what_is_unclear, and
+            # it is the more specific of the two - it names the clauses that
+            # were read and found wanting.
+            "grounded_reasoning": result.reasoning,
+        }
+
+    return {
+        **document_facts,
+        **usage_entry,
+        "grounded": True,
+        "grounded_outcome": result.outcome,
+        "grounded_clause_id": result.clause_id,
+        "grounded_clause_quote": result.clause_quote,
+        "grounded_reasoning": result.reasoning,
+    }
+
+
+def _route_after_ground(state: GraphState) -> str:
+    """Grounded decisions act; everything else goes to a person.
+
+    Deliberately a single boolean rather than a three-way branch on the
+    outcome string: there is exactly one condition under which this system
+    acts on an uncovered case without review, and it should be readable in
+    one line."""
+    return "grounded" if state.get("grounded") else "escalate"
+
+
+def _grounded_node(state: GraphState) -> dict:
+    """Writes a decision the document justified.
+
+    The only node that writes outcome 'ignore', and the only one whose output
+    no person reviews before it is recorded. What makes that acceptable is
+    the groundings row it writes alongside: the clause id, the verbatim
+    quote, and the clause ids retrieval offered - enough for obs/grounded.py
+    to check the decision mechanically against the document afterwards, and
+    enough for a person to check it by hand months later.
+    """
+    record = SubAreaRecord.from_dict(state["record"])
+    database_url = os.environ["DATABASE_URL"]
+    with psycopg.connect(database_url) as conn, conn.transaction():
+        result = ground_decision(
+            conn,
+            RunBudget(),
+            sub_area_id=state["sub_area_id"],
+            before_version_id=state["before_version_id"],
+            after_version_id=state["after_version_id"],
+            changed_fields=state["changed_fields"],
+            rule=state["rule"],
+            rule_set=RULE_SET_ID,
+            outcome=state["grounded_outcome"],
+            clause_id=state["grounded_clause_id"],
+            clause_quote=state["grounded_clause_quote"],
+            reasoning=state.get("grounded_reasoning", ""),
+            document_page_count=state.get("document_page_count") or None,
+            retrieved_clause_ids=state.get("retrieved_clause_ids") or [],
+            citation=record.doklink or "",
+        )
+    return {
+        "outcome": state["grounded_outcome"],
+        "result": {
+            "diff_id": result.diff_id,
+            "grounding_id": result.grounding_id,
+            # Present only for a grounded file. obs/online.py keys on this to
+            # tell the two grounded outcomes apart - see its outcome
+            # inference, which must never fall through to "unscored" for a
+            # grounded run.
+            **({"filing_id": result.filing_id} if result.filing_id is not None else {}),
+        },
+    }
+
+
 def _file_node(state: GraphState) -> dict:
     record = SubAreaRecord.from_dict(state["record"])
     summary = summarise(
@@ -343,6 +570,14 @@ def _escalate_node(state: GraphState) -> dict:
     thread_id = get_config()["configurable"]["thread_id"]
 
     what_is_unclear = state.get("assessment_what_is_unclear") or state["rule_reason"]
+    # When the ground node ran and could not decide, its reasoning is the
+    # more specific account of why - it names the clauses that were actually
+    # read. Appended rather than substituted: assess()'s what_is_unclear
+    # describes the change, the grounding reasoning describes the document,
+    # and a person answering this needs both.
+    grounding_note = state.get("grounded_reasoning") or state.get("document_error")
+    if grounding_note:
+        what_is_unclear = f"{what_is_unclear}\n\nFrom the source document: {grounding_note}"
     what_a_person_must_decide = state.get("assessment_what_a_person_must_decide")
 
     database_url = os.environ["DATABASE_URL"]

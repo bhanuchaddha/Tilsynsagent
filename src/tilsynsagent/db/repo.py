@@ -131,6 +131,47 @@ def insert_filing(conn: psycopg.Connection, *, diff_id: int, summary: str, citat
     return row[0]
 
 
+def insert_grounding(
+    conn: psycopg.Connection,
+    *,
+    diff_id: int,
+    clause_id: str,
+    clause_quote: str,
+    reasoning: str,
+    outcome: str,
+    document_page_count: int | None,
+    retrieved_clause_ids: list[str],
+) -> int:
+    """Records what the document said for a grounded decision.
+
+    Idempotent on diff_id (UNIQUE in the schema) for the same reason
+    insert_diff and insert_escalation are - see insert_diff's docstring. A
+    grounded run does not interrupt, but it shares the re-execution surface
+    of every other node, and a UniqueViolation on a retry would turn a
+    recoverable re-run into a failed one.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO groundings
+            (diff_id, clause_id, clause_quote, reasoning, outcome,
+             document_page_count, retrieved_clause_ids)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (diff_id) DO UPDATE SET diff_id = EXCLUDED.diff_id
+        RETURNING id
+        """,
+        (
+            diff_id,
+            clause_id,
+            clause_quote,
+            reasoning,
+            outcome,
+            document_page_count,
+            json.dumps(retrieved_clause_ids),
+        ),
+    ).fetchone()
+    return row[0]
+
+
 def insert_escalation(
     conn: psycopg.Connection,
     *,
@@ -323,3 +364,71 @@ def status_counts(conn: psycopg.Connection) -> dict:
         counts["watermark"] = row["last_datoopdt"] if row else None
 
         return counts
+
+def grounding_stats(conn: psycopg.Connection) -> dict:
+    """The grounding rate, and what it is made of.
+
+    **This is the number the phase exists to produce.** Everything else in
+    this system either follows a rule or waits for a person; the grounding
+    rate is the share of uncovered cases the agent settled by reading the
+    document, with nobody in the path. A rate of zero means the loop has
+    nothing to watch - no autonomous decisions, nothing that can degrade
+    quietly - and a rate of one would mean nothing ever escalates, which for
+    this domain would be a bug rather than an achievement.
+
+    Denominator is diffs whose rule is NULL: those are exactly the cases the
+    rule engine returned NOT_COVERED on, which are exactly the cases that
+    reach the ground node. A rule-decided filing was never a candidate for
+    grounding and must not dilute the rate.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*)                                          AS uncovered_total,
+              COUNT(g.id)                                       AS grounded_total,
+              COUNT(*) FILTER (WHERE g.outcome = 'file')        AS grounded_file,
+              COUNT(*) FILTER (WHERE g.outcome = 'ignore')      AS grounded_ignore,
+              COUNT(*) FILTER (WHERE g.id IS NULL)              AS abstained
+            FROM diffs d
+            LEFT JOIN groundings g ON g.diff_id = d.id
+            WHERE d.rule IS NULL
+            """
+        )
+        stats = dict(cur.fetchone())
+
+        cur.execute(
+            """
+            SELECT AVG(document_page_count)::float AS mean_page_count,
+                   COUNT(DISTINCT clause_id)       AS distinct_clauses_used
+            FROM groundings
+            """
+        )
+        stats.update(cur.fetchone())
+
+    total = stats["uncovered_total"] or 0
+    stats["grounding_rate"] = (stats["grounded_total"] / total) if total else 0.0
+    return stats
+
+
+def recent_groundings(conn: psycopg.Connection, limit: int = 25) -> list[dict]:
+    """Recent grounded decisions with the clause each rests on - the cards the
+    Business tab shows. Newest first."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT g.id AS grounding_id, g.clause_id, g.clause_quote, g.reasoning,
+                   g.outcome, g.retrieved_clause_ids, g.document_page_count, g.grounded_at,
+                   d.id AS diff_id, d.changed_fields,
+                   s.kommunenavn, s.komnr, s.lokplan_id, s.delnr, s.is_test_data,
+                   av.doklink
+            FROM groundings g
+            JOIN diffs d ON d.id = g.diff_id
+            JOIN sub_areas s ON s.id = d.sub_area_id
+            JOIN sub_area_versions av ON av.id = d.after_version_id
+            ORDER BY g.grounded_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return cur.fetchall()

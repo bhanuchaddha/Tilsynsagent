@@ -83,8 +83,9 @@ def run_pass(cases: list[dict]) -> list[dict]:
                 record["scores"]["valid_structured_output"] = 0.0
             elif result.output_text is not None:
                 record["scores"]["valid_structured_output"] = 1.0
-                for scorer in scorers.ALL_SCORERS:
-                    score = scorer(case, result.output_text)
+                for score in scorers.score_all(
+                    case, result.output_text, route=result.route
+                ):
                     record["scores"][score.name] = score.value
             records.append(record)
     return records
@@ -177,8 +178,7 @@ def _run_langfuse_experiment(cases: list[dict], *, run_name: str) -> None:
             return evals
         if output.output_text is not None:
             evals.append(Evaluation(name="valid_structured_output", value=1.0))
-            for scorer in scorers.ALL_SCORERS:
-                score = scorer(case, output.output_text)
+            for score in scorers.score_all(case, output.output_text, route=output.route):
                 evals.append(Evaluation(name=score.name, value=score.value, comment=score.comment))
         return evals
 

@@ -1,0 +1,87 @@
+# The nightly loop: promote what people annotated, run the dataset, compare
+# against the previous run, alert on a drop.
+#
+# **This job gets Langfuse keys and the eval gate deliberately does not.**
+# That asymmetry is the point, not an oversight:
+#
+#   - The *gate* (evals.yml) decides whether a pull request may merge. A merge
+#     verdict must never depend on an observability vendor being reachable, so
+#     it runs against prompts pinned in llm/prompts.py and thresholds committed
+#     in this repo.
+#   - The *nightly* IS the vendor loop. It reads annotations a person left in
+#     Langfuse, promotes them into the dataset, and compares dataset runs. It
+#     has nothing to do without keys.
+#
+# A system that cannot say which of its checks are vendor-independent has not
+# thought about what happens when the vendor is down.
+#
+# All logic lives in `tilsynsagent nightly` (src/tilsynsagent/nightly.py), not
+# in this file - so what CI runs is exactly what a person can run by hand.
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC. Deliberately far from working hours in CET: this job makes a
+    # full pass over the dataset, and Groq's free tier is 8000 TPM org-wide,
+    # so it must not overlap a pull request's eval gate run - see the
+    # concurrency group below, which it shares with evals.yml for that reason.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # The same group evals.yml uses. Two full eval passes racing each other
+  # exhaust the free tier's per-minute ceiling and produce an inconclusive
+  # run, which reads like a regression and is nothing of the sort.
+  group: evals-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: nightly eval, regression check and alert
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: Run the nightly
+        id: nightly
+        # Never fails the workflow on a regression: a regression is a finding
+        # to record and alert on, not a broken build. The alert file written
+        # into docs/alerts/ is the artefact, and the step below commits it.
+        continue-on-error: true
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: openai/gpt-oss-120b
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+        run: uv run tilsynsagent nightly
+
+      # The committed record. docs/evals/nightly/*.json is the regression
+      # baseline that survives Langfuse's 30-day retention, and
+      # docs/alerts/ is the alert history - both are worthless if they only
+      # exist inside a finished job.
+      - name: Commit the run record and any alert
+        run: |
+          git config user.name "tilsynsagent-nightly"
+          git config user.email "noreply@github.com"
+          git add docs/evals/nightly docs/evals/judge-agreement-*.md docs/alerts evals/golden/cases.jsonl || true
+          if git diff --staged --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "Nightly run $(date -u +%Y-%m-%d): eval record, alerts and promoted cases"
+            git push
+          fi
+
+      - name: Upload the run's JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-run
+          path: docs/evals/nightly/*.json

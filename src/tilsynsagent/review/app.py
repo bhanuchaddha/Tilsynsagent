@@ -14,6 +14,24 @@ _escalate_node docstring on re-entry).
 Plain and ugly on purpose (docs/PLAN.md Phase 3): three views (queue, one
 escalation, after-answer confirmation), no styling beyond Streamlit's
 defaults.
+
+**Why this app exists at all when Langfuse does.** The dividing line is
+worth stating, because it is the first thing anyone asks:
+
+    Langfuse owns what a business person touches - traces, scores,
+    annotation queues, prompt versions, dataset runs. This app owns this
+    system's *operational state*, which Langfuse has no concept of: the
+    review queue of paused runs, the watermark, open escalations, the
+    grounding rate, and the alert files in docs/alerts/.
+
+Rebuilding annotation in here would be rebuilding a product; putting a
+watermark in Langfuse is not possible. The Business tab therefore deep-links
+*out* to Langfuse rather than reimplementing it.
+
+Two Streamlit facts constrain everything added here: every tab body executes
+on every rerun whether visible or not (so queries stay narrow), and nothing
+`st.*`-shaped is testable in this repo (so real logic lives in
+`review/repo.py`).
 """
 
 from __future__ import annotations
@@ -31,6 +49,8 @@ from tilsynsagent.db import repo
 from tilsynsagent.demo.reset import reset_demo
 from tilsynsagent.graph import make_graph, resume_run
 from tilsynsagent.llm.pricing import load_pricing
+from tilsynsagent.obs.alerts import open_alerts
+from tilsynsagent.review import repo as ui
 
 RESOLVED_BY = os.environ.get("TILSYNSAGENT_REVIEWER", "reviewer")
 GOLDEN_CASES_PATH = Path(__file__).resolve().parents[3] / "evals" / "golden" / "cases.jsonl"
@@ -238,25 +258,15 @@ def _escalation_view(escalation_id: int) -> None:
         st.rerun()
 
 
-def _is_scoreable_label(label: str) -> bool:
-    """The eval pipeline only has routes for file/escalate (evals/README.md:
-    "There is no ignore route" until Phase 6 grounding lands) - an
-    escalation resolved "ignore" must not be offered for evals/golden/
-    cases.jsonl, or expected_route() would see a label it cannot map."""
-    return label != "ignore"
-
-
 def _add_to_dataset_section(detail: dict) -> None:
     st.subheader("Add to dataset")
 
-    if not _is_scoreable_label(detail["resolution_label"]):
-        st.caption(
-            "This resolution was 'ignore', which the eval pipeline cannot score yet - "
-            "evals/README.md: there is no ignore route until Phase 6 grounding lands. "
-            "Not added to evals/golden/cases.jsonl."
-        )
-        return
-
+    # Every resolution label is addable now, including 'ignore'. It was not
+    # always: this section used to refuse an ignore-labelled resolution
+    # because the eval pipeline had no route for it. Grounding gave it one
+    # (evals/cases.py maps an ignore label to the grounded_ignore route), and
+    # the guard was removed rather than left in place - a stale explanation in
+    # a screen a stranger reads is worse than no explanation.
     st.caption(
         "One click appends this resolution to evals/golden/cases.jsonl, tagged "
         "escalation-derived. Manual on purpose — see docs/PLAN.md Phase 3."
@@ -345,16 +355,312 @@ def _status_view() -> None:
 
 
 
+def _langfuse_base() -> str | None:
+    return os.environ.get("LANGFUSE_BASE_URL")
+
+
+def _business_view() -> None:
+    """For someone who will never open the code.
+
+    One question is asked of this reader, and it is the only one they can
+    answer that nobody else can: **was the agent right?** Everything on this
+    screen exists to make that question answerable in under a minute - the
+    change the agent saw, what it decided, and the clause it decided from.
+
+    No scorer names in the banner beyond the one that fired, no prompt
+    versions, no case ids. Those are the Developer tab's business, and the
+    same failure appears there one dataset later.
+    """
+    st.title("Production quality")
+
+    with _conn() as conn:
+        groundings = repo.recent_groundings(conn, limit=25)
+
+    flagged = ui.flagged_grounded_runs(groundings)
+    queue_url = ui.langfuse_queue_url(_langfuse_base(), os.environ.get("LANGFUSE_QUEUE_URL"))
+
+    alerts = [a for a in open_alerts() if "quality-drop" in a["name"]]
+    if alerts:
+        newest = alerts[0]
+        st.error(f"**{newest['title']}**")
+        st.caption(
+            f"Recorded in `{newest['name']}`"
+            + (f", seen again {newest['recurrences']} time(s) since." if newest["recurrences"] else ".")
+        )
+    elif flagged:
+        st.warning(
+            f"{len(flagged)} recent decision(s) failed an automated check. "
+            "No quality alert has fired yet - a single failure is a case, not a trend."
+        )
+    else:
+        st.success("No quality alert. Recent decisions passed their automated checks.")
+
+    st.divider()
+    st.subheader("Decisions the agent made on its own")
+    st.caption(
+        "These are the only decisions in this system that no person reviewed before "
+        "they were recorded. The agent read the plan document and settled the case "
+        "from a clause in it. For each one, the question is simply whether it was right."
+    )
+
+    if not groundings:
+        st.info(
+            "None yet. Grounded decisions only happen on changes the written rules do "
+            "not cover. Run `tilsynsagent seed-demo` to produce some."
+        )
+        return
+
+    flagged_ids = {f["grounding_id"] for f in flagged}
+    for row in groundings:
+        is_flagged = row["grounding_id"] in flagged_ids
+        with st.container(border=True):
+            header, action = st.columns([5, 2])
+            header.markdown(
+                f"**{row['kommunenavn'] or row['komnr']}** · plan {row['lokplan_id']}, "
+                f"sub-area {row['delnr']}"
+                + ("  ·  *demo*" if row["is_test_data"] else "")
+            )
+            if is_flagged:
+                header.markdown(":red[**Flagged by an automated check**]")
+
+            st.write(f"**What changed:** {_changed_fields_sentence(row['changed_fields'])}")
+            st.write(
+                f"**What the agent decided:** "
+                + ("file it as something a reader should see" if row["outcome"] == "file"
+                   else "nothing new for a reader to see")
+            )
+            st.markdown(
+                f"**The clause it used** — {row['clause_id']}:\n\n> {row['clause_quote']}"
+            )
+            if row["reasoning"]:
+                st.caption(row["reasoning"])
+
+            if is_flagged:
+                for name, comment in next(f["failing"] for f in flagged if f["grounding_id"] == row["grounding_id"]):
+                    st.markdown(f":red[⚠ {name}] — {comment}")
+
+            if queue_url:
+                action.link_button("Review in Langfuse", queue_url)
+            if row["doklink"]:
+                action.markdown(f"[Source document]({row['doklink']})")
+
+
+def _changed_fields_sentence(changed_fields: dict) -> str:
+    """Changed fields in plain language, for a reader who does not know the
+    register's Danish column names."""
+    names = {
+        "maxbygnhjd": "maximum building height",
+        "maxetager": "maximum storeys",
+        "bebygpct": "site coverage percentage",
+        "zonestatus": "zone status",
+        "anvendelsegenerel": "permitted use",
+        "status": "plan status",
+    }
+    if not changed_fields:
+        return "nothing visible in the register changed - only the plan's revision date moved"
+    parts = []
+    for field, change in changed_fields.items():
+        label = names.get(field, field)
+        before = change.get("before") if isinstance(change, dict) else None
+        after = change.get("after") if isinstance(change, dict) else None
+        parts.append(f"{label}: {before if before is not None else 'blank'} → {after if after is not None else 'blank'}")
+    return "; ".join(parts)
+
+
+def _developer_view() -> None:
+    """The same failure the Business tab shows, one dataset later.
+
+    The one thing this screen must do that a score cannot: separate a **new
+    case** from a **case that newly fails**. A new failing case is the dataset
+    doing its job - somebody labelled a production run because the agent got
+    it wrong. A case that used to pass and now fails is a regression. The
+    responses are opposite and an aggregate makes them look identical.
+    """
+    st.title("Regressions")
+
+    comparison = ui.latest_comparison()
+    if comparison is None:
+        st.info(
+            "Fewer than two nightly runs recorded. Run `tilsynsagent nightly` twice - "
+            "the second run is the first one that has anything to compare against."
+        )
+        return
+
+    previous_score = comparison.previous.mean_score if comparison.previous else 0.0
+    if comparison.regressed:
+        st.error(
+            f"**Regression: {previous_score:.3f} → {comparison.current.mean_score:.3f}**"
+        )
+    else:
+        st.success(
+            f"No regression: {previous_score:.3f} → {comparison.current.mean_score:.3f}"
+        )
+    st.caption(
+        f"`{comparison.previous.name if comparison.previous else '—'}` → "
+        f"`{comparison.current.name}`, tolerance ±0.02 — temperature=0 is not "
+        "determinism on a hosted mixture-of-experts endpoint, and an alert that fires "
+        "on run-to-run wobble gets muted."
+    )
+
+    st.divider()
+    new_col, failing_col = st.columns(2)
+    with new_col:
+        st.subheader(f"New cases ({len(comparison.new_case_ids)})")
+        st.caption(
+            "Cases the dataset gained since the last run. A new case that fails is **not "
+            "a regression** — it is a case a person added precisely because the agent got "
+            "it wrong. The score dropping here is the dataset working."
+        )
+        st.write(", ".join(f"`{c}`" for c in comparison.new_case_ids) or "None.")
+    with failing_col:
+        st.subheader(f"Newly failing ({len(comparison.newly_failing_case_ids)})")
+        st.caption(
+            "Cases that used to pass and now do not. The dataset did not change; the "
+            "behaviour did. **These are the regressions.**"
+        )
+        st.write(", ".join(f"`{c}`" for c in comparison.newly_failing_case_ids) or "None.")
+
+    st.divider()
+    st.subheader("Per-scorer movement")
+    st.dataframe(
+        [
+            {
+                "scorer": name,
+                "previous": f"{comparison.previous.per_scorer.get(name, 0):.3f}" if comparison.previous else "—",
+                "current": f"{comparison.current.per_scorer.get(name, 0):.3f}",
+                "delta": f"{delta:+.3f}",
+                "regressed": "yes" if name in comparison.regressed_scorers else "",
+            }
+            for name, delta in sorted(comparison.per_scorer_delta.items())
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.subheader("Prompt versions")
+    st.caption(
+        "A prompt edit changes behaviour exactly as much as a code change and appears in "
+        "no code diff. If a version moved between these runs, look there first. The fix "
+        "is a new version in Langfuse with the `production` label moved to it — no deploy."
+    )
+    st.dataframe(
+        [
+            {
+                "step": step,
+                "previous": (comparison.previous.prompt_versions or {}).get(step, "—") if comparison.previous else "—",
+                "current": version,
+                "changed": "yes" if comparison.previous and (comparison.previous.prompt_versions or {}).get(step) != version else "",
+            }
+            for step, version in sorted(comparison.current.prompt_versions.items())
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.subheader("Judge vs. human")
+    reports = sorted(
+        (Path(__file__).resolve().parents[3] / "docs" / "evals").glob("judge-agreement-*.md"),
+        reverse=True,
+    )
+    if not reports:
+        st.caption(
+            "Not measured yet. Agreement needs human labels from the annotation queue, "
+            "which arrive days after the judge scores they are about — see "
+            "`docs/judge-configuration.md`."
+        )
+    else:
+        st.caption(f"Most recent: `{reports[0].name}`")
+        st.markdown(reports[0].read_text())
+
+
+def _operator_view() -> None:
+    """What is running, what is stuck, and what grounding costs."""
+    st.title("Operations")
+
+    with _conn() as conn:
+        counts = repo.status_counts(conn)
+        grounding = repo.grounding_stats(conn)
+        groundings = repo.recent_groundings(conn, limit=50)
+
+    st.subheader("Grounding rate")
+    st.caption(
+        "The number this whole layer exists to produce: how often the agent settles a "
+        "case the written rules do not cover by reading the plan document, with no "
+        "person in the path."
+    )
+    a, b, c = st.columns(3)
+    a.metric("Decided from the document", grounding["grounded_total"])
+    b.metric("Handed to a person", grounding["abstained"])
+    c.metric("Grounding rate", f"{grounding['grounding_rate']:.0%}")
+    st.write(ui.grounding_rate_sentence(grounding))
+
+    d, e = st.columns(2)
+    d.metric("Grounded: filed", grounding["grounded_file"])
+    e.metric("Grounded: ignored", grounding["grounded_ignore"])
+    st.caption(
+        "'Ignored' is not the agent doing nothing. It is a positive claim backed by a "
+        "quoted clause — the most heavily evidenced outcome the system produces."
+    )
+
+    st.divider()
+    st.subheader("Open alerts")
+    alerts = open_alerts()
+    summary = ui.alert_summary(alerts)
+    if not alerts:
+        st.success("No alerts on file.")
+    else:
+        st.write(
+            f"{summary['total']} alert file(s) in `docs/alerts/` — "
+            f"{summary['real']} real, {summary['demo']} demo, "
+            f"{summary['recurring']} with repeat occurrences."
+        )
+        for alert in alerts[:10]:
+            st.markdown(
+                f"- {'*(demo)* ' if alert['is_demo'] else ''}**{alert['title']}** "
+                f"— `{alert['name']}`"
+                + (f" · seen again ×{alert['recurrences']}" if alert["recurrences"] else "")
+            )
+        st.caption(
+            "Alerts are files, not Slack messages: Langfuse's free tier forgets after 30 "
+            "days, so anything that must outlive that is committed at the moment it "
+            "happens. A repeat appends to the same file rather than creating a new one."
+        )
+
+    st.divider()
+    st.subheader("Runs and queue")
+    f, g, h = st.columns(3)
+    f.metric("Open escalations", counts["escalations_open"])
+    g.metric("Sub-areas watched (live)", counts["sub_areas_live"])
+    h.metric("Versions recorded (live)", counts["versions_live"])
+    st.write(f"Watermark — last source update processed: **{counts['watermark'] or 'never run'}**")
+
+    st.subheader("Document cost")
+    st.write(ui.document_cache_rate(groundings))
+
+
 def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="Tilsynsagent — review queue", layout="wide")
 
     _sidebar()
 
-    queue_tab, status_tab = st.tabs(["Review queue", "Status"])
+    # Every tab body executes on every rerun, visible or not - so each of these
+    # keeps its queries narrow, and none of them fetches a document.
+    queue_tab, status_tab, business_tab, developer_tab, operator_tab = st.tabs(
+        ["Review queue", "Status", "Business", "Developer", "Operator"]
+    )
 
     with status_tab:
         _status_view()
+
+    with business_tab:
+        _business_view()
+
+    with developer_tab:
+        _developer_view()
+
+    with operator_tab:
+        _operator_view()
 
     with queue_tab:
         _main_queue()

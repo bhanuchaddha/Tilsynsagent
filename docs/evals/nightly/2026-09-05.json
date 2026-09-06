@@ -1,0 +1,150 @@
+{
+  "resolved_models": {
+    "assess": "openai/gpt-oss-120b",
+    "summarise": "openai/gpt-oss-120b"
+  },
+  "resolved_prompts": {
+    "assess": "tilsynsagent-assess-system@v3",
+    "summarise": "tilsynsagent-summarise-system@v3"
+  },
+  "rule_engine_coverage": 1.0,
+  "n_cases": 6,
+  "passes": [
+    {
+      "records": [
+        {
+          "case_id": "ZL-003",
+          "expected_route": "escalate",
+          "actual_route": "escalate",
+          "route_match": true,
+          "error": null,
+          "usage": null,
+          "latency_ms": null,
+          "scores": {}
+        },
+        {
+          "case_id": "ZL-001",
+          "expected_route": "escalate",
+          "actual_route": "escalate",
+          "route_match": true,
+          "error": null,
+          "usage": null,
+          "latency_ms": null,
+          "scores": {}
+        },
+        {
+          "case_id": "ZL-002",
+          "expected_route": "escalate",
+          "actual_route": "escalate",
+          "route_match": true,
+          "error": null,
+          "usage": null,
+          "latency_ms": null,
+          "scores": {}
+        },
+        {
+          "case_id": "ZL-004",
+          "expected_route": "file",
+          "actual_route": "file",
+          "route_match": true,
+          "error": null,
+          "usage": {
+            "model": "openai/gpt-oss-120b",
+            "prompt_tokens": 518,
+            "completion_tokens": 272,
+            "total_tokens": 790,
+            "latency_ms": 783.4637080086395
+          },
+          "latency_ms": 829.5917909708805,
+          "scores": {
+            "valid_structured_output": 1.0,
+            "citation_fidelity": 1.0,
+            "no_invented_numbers": 1.0,
+            "states_both_values": 1.0,
+            "did_not_read_the_document": 1.0
+          }
+        },
+        {
+          "case_id": "ZL-005",
+          "expected_route": "file",
+          "actual_route": "file",
+          "route_match": true,
+          "error": null,
+          "usage": {
+            "model": "openai/gpt-oss-120b",
+            "prompt_tokens": 509,
+            "completion_tokens": 316,
+            "total_tokens": 825,
+            "latency_ms": 1126.6799590084702
+          },
+          "latency_ms": 1238.0551249952987,
+          "scores": {
+            "valid_structured_output": 1.0,
+            "citation_fidelity": 1.0,
+            "no_invented_numbers": 1.0,
+            "states_both_values": 1.0,
+            "did_not_read_the_document": 1.0
+          }
+        },
+        {
+          "case_id": "ZL-006",
+          "expected_route": "file",
+          "actual_route": "file",
+          "route_match": true,
+          "error": null,
+          "usage": {
+            "model": "openai/gpt-oss-120b",
+            "prompt_tokens": 499,
+            "completion_tokens": 369,
+            "total_tokens": 868,
+            "latency_ms": 1049.778165994212
+          },
+          "latency_ms": 1060.0908329943195,
+          "scores": {
+            "valid_structured_output": 1.0,
+            "citation_fidelity": 1.0,
+            "no_invented_numbers": 1.0,
+            "states_both_values": 1.0,
+            "did_not_read_the_document": 1.0
+          }
+        }
+      ],
+      "aggregate": {
+        "n_cases": 6,
+        "n_llm_calls": 3,
+        "llm_step_error_rate": 0.0,
+        "mean_tokens_per_case": 827.6666666666666,
+        "total_cost_usd": 0.000803,
+        "scorers": {
+          "citation_fidelity": {
+            "mean": 1.0,
+            "n": 3,
+            "failing_case_ids": []
+          },
+          "did_not_read_the_document": {
+            "mean": 1.0,
+            "n": 3,
+            "failing_case_ids": []
+          },
+          "no_invented_numbers": {
+            "mean": 1.0,
+            "n": 3,
+            "failing_case_ids": []
+          },
+          "states_both_values": {
+            "mean": 1.0,
+            "n": 3,
+            "failing_case_ids": []
+          },
+          "valid_structured_output": {
+            "mean": 1.0,
+            "n": 3,
+            "failing_case_ids": []
+          }
+        },
+        "route_mismatches": [],
+        "rule_engine_coverage": 1.0
+      }
+    }
+  ]
+}

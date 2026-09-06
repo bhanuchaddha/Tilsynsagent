@@ -31,7 +31,13 @@ def reset_demo(database_url: str | None = None) -> dict:
     """Deletes all is_test_data=True rows and their LangGraph checkpoints.
     Returns counts of what was removed."""
     database_url = database_url or os.environ["DATABASE_URL"]
-    counts = {"sub_areas": 0, "checkpoint_threads": 0}
+    counts = {
+        "sub_areas": 0,
+        "checkpoint_threads": 0,
+        "demo_documents": 0,
+        "cached_documents": 0,
+        "demo_alerts": 0,
+    }
 
     with psycopg.connect(database_url) as conn, conn.transaction():
         thread_rows = conn.execute(
@@ -53,6 +59,18 @@ def reset_demo(database_url: str | None = None) -> dict:
         conn.execute(
             """
             DELETE FROM escalations WHERE diff_id IN (
+                SELECT d.id FROM diffs d
+                JOIN sub_areas s ON s.id = d.sub_area_id
+                WHERE s.is_test_data
+            )
+            """
+        )
+        # groundings before diffs, and before filings only because they are
+        # independent - the FK is groundings.diff_id, so every grounding must
+        # go before the diff it hangs off.
+        conn.execute(
+            """
+            DELETE FROM groundings WHERE diff_id IN (
                 SELECT d.id FROM diffs d
                 JOIN sub_areas s ON s.id = d.sub_area_id
                 WHERE s.is_test_data
@@ -95,7 +113,41 @@ def reset_demo(database_url: str | None = None) -> dict:
             conn.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
         counts["checkpoint_threads"] = len(thread_ids)
 
+    # Everything below is on disk rather than in the database, and is cleared
+    # after the transaction commits: a failure here leaves stale files, which
+    # a re-run fixes, whereas rolling back the database delete to protect a
+    # file cleanup would leave demo rows in the register.
+    counts.update(_reset_files())
+
     logger.info("reset complete: %s", counts)
+    return counts
+
+
+def _reset_files() -> dict:
+    """Clears the on-disk demo artefacts: generated documents, their cache
+    entries, and demo alert files.
+
+    Demo alerts are deleted by *filename*, not by reading their contents:
+    obs/alerts.py names a demo alert with a `demo-` prefix precisely so this
+    function can tell them apart from real alerts without parsing. The
+    committed alert record in docs/alerts/ is a permanent artefact of
+    this project and a reset must never be able to touch it - which means
+    "delete the alerts" has to be a decision made by a naming scheme agreed
+    when the alert is written, not a judgement made at deletion time.
+    """
+    from tilsynsagent.demo.documents import clear_demo_documents, demo_document_dir
+    from tilsynsagent.documents.cache import clear_cache
+
+    documents = list(demo_document_dir().glob("*.pdf"))
+    doklinks = [p.resolve().as_uri() for p in documents]
+    counts = {
+        "cached_documents": clear_cache(prefix_urls=doklinks),
+        "demo_documents": clear_demo_documents(),
+    }
+
+    from tilsynsagent.obs.alerts import clear_demo_alerts
+
+    counts["demo_alerts"] = clear_demo_alerts()
     return counts
 
 

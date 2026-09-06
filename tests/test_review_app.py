@@ -150,12 +150,24 @@ def test_version_dict_maps_db_row_to_case_shape():
     }
 
 
-@pytest.mark.parametrize(
-    "label,expected",
-    [("file", True), ("escalate", True), ("ignore", False)],
-)
-def test_is_scoreable_label(label, expected):
-    """Only 'ignore' is excluded from the dataset-append offer - the eval
-    pipeline has no route for it until Phase 6 grounding lands
-    (evals/README.md)."""
-    assert app._is_scoreable_label(label) is expected
+@pytest.mark.parametrize("label", ["file", "escalate", "ignore"])
+def test_every_resolution_label_maps_to_a_route(label):
+    """Every label a reviewer can give is now addable to the dataset.
+
+    This replaces a test for app._is_scoreable_label, which excluded 'ignore'
+    because the eval pipeline had no route for it. Grounding added one, the
+    guard was deleted, and the property worth protecting is the underlying
+    one: nothing a person can choose in the review screen produces a case
+    expected_route() cannot map.
+    """
+    from evals.cases import expected_route
+
+    case = {"id": "EC-999", "label": label, "origin": "escalation-derived"}
+    assert expected_route(case) == "escalate"
+
+    hand_labelled = {"id": "ZL-999", "label": label}
+    assert expected_route(hand_labelled) in (
+        "file",
+        "escalate",
+        "grounded_ignore",
+    )

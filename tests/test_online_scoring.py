@@ -130,11 +130,48 @@ def test_sampling_is_stable_for_the_same_run():
 # --- score_run -----------------------------------------------------------
 
 
-def test_score_run_returns_every_scorer():
+def test_score_run_returns_every_ungrounded_scorer():
     scores = score_run(
         outcome="file", rule="R2", citation=DOC, doklink=DOC, result={"filing_id": 1}
     )
-    assert {s.name for s in scores} == set(DEGRADED)
+    assert {s.name for s in scores} == {
+        "cited_source_present",
+        "escalated_when_uncovered",
+        "stayed_in_tool_surface",
+    }
+
+
+def test_every_threshold_has_a_scorer_that_can_produce_it():
+    """No threshold in DEGRADED may name a scorer nothing ever emits.
+
+    This used to be expressible as "score_run emits exactly DEGRADED", and
+    that broke when grounded scorers arrived on a second path. The property
+    it was protecting is still the one that matters, and is worth more than
+    the shape it was written in: a threshold whose scorer never runs sits at
+    "not scored in this window" forever, which reads as harmless in the drift
+    output and is in fact a check that silently does nothing.
+    """
+    from tilsynsagent.obs.grounded import score_grounded_run
+
+    ungrounded = {
+        s.name
+        for s in score_run(
+            outcome="file", rule="R2", citation=DOC, doklink=DOC, result={"filing_id": 1}
+        )
+    }
+    grounded = {
+        s.name
+        for s in score_grounded_run(
+            grounded=True,
+            outcome="file",
+            clause_id="6.3",
+            clause_quote="q",
+            clause_text="6.3 q",
+            retrieved_clause_ids=["6.3"],
+            changed_fields={"maxetager": {}},
+        )
+    }
+    assert set(DEGRADED) == ungrounded | grounded
 
 
 # --- drift ---------------------------------------------------------------

@@ -21,6 +21,13 @@ def main() -> None:
     )
     subparsers.add_parser("reset-demo", help="Delete all demo/test data. Live rows untouched.")
     subparsers.add_parser("review", help="Launch the Streamlit review queue.")
+    nightly = subparsers.add_parser(
+        "nightly",
+        help="Promote annotations, run the dataset, compare to the previous run, alert on a drop.",
+    )
+    nightly.add_argument("--limit", type=int, default=None, help="Only run the first N cases.")
+    nightly.add_argument("--no-promote", action="store_true", help="Skip promotion.")
+    nightly.add_argument("--no-judge", action="store_true", help="Skip judge agreement.")
     # Unknown args are forwarded to Streamlit by the `review` command (e.g.
     # --server.port, --server.headless), which is how the UI is launched
     # non-interactively. Every other command rejects them below.
@@ -59,6 +66,16 @@ def main() -> None:
         from tilsynsagent.demo.reset import reset_demo
 
         reset_demo()
+    elif args.command == "nightly":
+        from tilsynsagent.nightly import run_nightly
+
+        code = run_nightly(
+            limit=args.limit, promote=not args.no_promote, judge=not args.no_judge
+        )
+        from tilsynsagent import obs
+
+        obs.shutdown()
+        raise SystemExit(code)
     elif args.command == "review":
         import streamlit.web.cli as stcli
 
