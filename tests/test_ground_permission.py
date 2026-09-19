@@ -47,7 +47,7 @@ def test_a_decision_without_a_clause_is_refused_before_any_write():
     """The check is here, before the write, rather than left to a scorer: a
     scorer tells you a bad decision was made; this stops it being recorded as
     a decision at all."""
-    with pytest.raises(PermissionDenied, match="cites a clause"):
+    with pytest.raises(PermissionDenied, match="names the clause"):
         ground_decision(
             None,
             RunBudget(),
@@ -61,8 +61,8 @@ def test_a_decision_without_a_clause_is_refused_before_any_write():
             clause_id="",
             clause_quote="something",
             reasoning="r",
+            citation_kind="clause",
             document_page_count=10,
-            retrieved_clause_ids=[],
         )
 
 
@@ -81,8 +81,76 @@ def test_a_decision_without_a_quote_is_refused_before_any_write():
             clause_id="6.2",
             clause_quote="   ",
             reasoning="r",
+            citation_kind="clause",
             document_page_count=10,
-            retrieved_clause_ids=["6.2"],
+        )
+
+
+def test_a_field_citation_without_a_field_name_is_refused_before_any_write():
+    """The citation kind stage 1 added must be gated as tightly as the one it
+    joined - a decision resting on an unnamed field is untraceable."""
+    with pytest.raises(PermissionDenied, match="names the field"):
+        ground_decision(
+            None,
+            RunBudget(),
+            sub_area_id=1,
+            before_version_id=1,
+            after_version_id=2,
+            changed_fields={},
+            rule=None,
+            rule_set="v2",
+            outcome="file",
+            citation_kind="field",
+            clause_id="",
+            clause_quote="",
+            field_name="",
+            field_before="Forslag",
+            field_after="Vedtaget",
+            reasoning="r",
+            document_page_count=10,
+        )
+
+
+def test_a_field_citation_without_any_value_is_refused_before_any_write():
+    with pytest.raises(PermissionDenied, match="names the field"):
+        ground_decision(
+            None,
+            RunBudget(),
+            sub_area_id=1,
+            before_version_id=1,
+            after_version_id=2,
+            changed_fields={},
+            rule=None,
+            rule_set="v2",
+            outcome="file",
+            citation_kind="field",
+            clause_id="",
+            clause_quote="",
+            field_name="status",
+            reasoning="r",
+            document_page_count=10,
+        )
+
+
+def test_an_unknown_citation_kind_is_refused_before_any_write():
+    """A decision that does not say what kind of source it rests on cannot be
+    checked by either scorer, so it must not become a recorded decision."""
+    with pytest.raises(PermissionDenied, match="citation_kind"):
+        ground_decision(
+            None,
+            RunBudget(),
+            sub_area_id=1,
+            before_version_id=1,
+            after_version_id=2,
+            changed_fields={},
+            rule=None,
+            rule_set="v2",
+            outcome="file",
+            citation_kind="",
+            clause_id="6.2",
+            clause_quote="q",
+            reasoning="r",
+            document_page_count=10,
         )
 
 
@@ -101,8 +169,8 @@ def test_an_outcome_outside_the_permission_is_refused_first():
             clause_id="6.2",
             clause_quote="q",
             reasoning="r",
+            citation_kind="clause",
             document_page_count=10,
-            retrieved_clause_ids=["6.2"],
         )
 
 

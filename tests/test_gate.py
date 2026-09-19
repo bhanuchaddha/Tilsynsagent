@@ -33,19 +33,17 @@ def _aggregate(**overrides) -> dict:
 
 
 def test_committed_thresholds_pass_the_recorded_baseline():
-    """The thresholds shipped in evals/thresholds.json must accept the
-    behaviour recorded in docs/evals/baseline-2026-09-04.md. If this fails,
-    the gate would block every pull request including ones that change
-    nothing."""
+    """The thresholds shipped in evals/thresholds.json must accept a passing
+    run, or the gate would block every pull request including ones that
+    change nothing."""
     passed, _ = evaluate(_aggregate(), load_thresholds())
     assert passed
 
 
 def test_the_repaired_regression_would_be_caught():
-    """The exact numbers from docs/evals/baseline-2026-08-29.md's headline
-    finding, replayed. This is the regression the gate was built for; if the
-    thresholds ever drift high enough to let 0.704 through, the gate has
-    stopped protecting the project's one rule."""
+    """A previously-observed regression, replayed: if the thresholds ever
+    drift high enough to let 0.704 through, the gate has stopped protecting
+    the project's one rule."""
     aggregate = _aggregate(
         scorers={
             "citation_fidelity": {

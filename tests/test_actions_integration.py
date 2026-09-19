@@ -1,4 +1,4 @@
-"""Integration tests against the real Neon database (Phase 1 verification 6).
+"""Integration tests against the real Neon database.
 
 Skipped automatically if DATABASE_URL is not set. These prove refusal happens
 before execution, not after: a permission violation must leave zero rows

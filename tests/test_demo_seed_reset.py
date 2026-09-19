@@ -1,9 +1,9 @@
 """Integration tests for demo/seed.py and demo/reset.py against the real
-Neon database (Phase 3, PLAN.md's "How we prove it works" items 1 and 4).
+Neon database.
 
-Skipped automatically if DATABASE_URL or GROQ_API_KEY is not set, same
-convention as test_actions_integration.py - seed_demo makes real Groq calls
-for the NOT_COVERED cases (assess()), so this needs both.
+Skipped automatically if DATABASE_URL or GROQ_API_KEY is not set - seed_demo
+makes real Groq calls for the NOT_COVERED cases (assess()), so this needs
+both.
 """
 
 from __future__ import annotations
@@ -27,9 +27,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # A small mix, one of each outcome shape - enough to prove the pipeline
-# without a full one-minute seed run in the test suite (docs/PLAN.md Phase 3:
-# "small enough to seed in under a minute" is about the demo UX, not this
-# test's budget).
+# without a full seed run in the test suite.
 SMALL_CASE_IDS = ["ZL-004", "ZL-001", "NC-001"]
 
 

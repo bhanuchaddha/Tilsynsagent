@@ -3,13 +3,10 @@ returns NOT_COVERED.
 
 The model never decides what is compliant; it decides what is worth a
 person's attention, and explains why. It is given the change, the rule set's
-stated boundary (docs/rules.md, "What this rule set does not cover"), and the
-source document link, and returns what is unclear, what a person must decide,
-and a citation - never a file/escalate/ignore label. That label is not this
-step's job: apply_rules already returned NOT_COVERED, so the only outcome
-downstream is escalation. Making the model choose a label it cannot act on
-would just be inviting the "the model was wrong" disagreement class the
-project's decision architecture exists to avoid.
+stated boundary, and the source document link, and returns what is unclear,
+what a person must decide, and a citation - never a file/escalate/ignore
+label, since apply_rules already returned NOT_COVERED and the only outcome
+downstream is escalation.
 """
 
 from __future__ import annotations

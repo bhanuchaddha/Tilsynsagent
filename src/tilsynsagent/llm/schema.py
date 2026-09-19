@@ -1,11 +1,9 @@
 """Shared helper for Groq's strict structured-output mode.
 
-Verified live against openai/gpt-oss-120b (Phase 1 verification 1): the
-endpoint rejects a Pydantic-generated JSON schema unless every object node
-carries ``additionalProperties: false``, which Pydantic's own
-``model_json_schema()`` does not emit. This is that fix, applied once, so
-every strict call in the project goes through it rather than re-discovering
-the requirement.
+The endpoint rejects a Pydantic-generated JSON schema unless every object
+node carries ``additionalProperties: false``, which Pydantic's own
+``model_json_schema()`` does not emit. This fix is applied once here, so
+every strict call in the project goes through it.
 """
 
 from __future__ import annotations

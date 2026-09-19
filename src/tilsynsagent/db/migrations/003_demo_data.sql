@@ -1,5 +1,5 @@
--- Marks rows created by the Phase 3 demo seed (demo/seed.py) so a reset can
--- wipe test data without touching live run history.
+-- Marks rows created by the demo seed (demo/seed.py) so a reset can wipe
+-- test data without touching live run history.
 --
 -- Tagged on sub_areas only, not every table: every other table in the FK
 -- chain (sub_area_versions, diffs, filings, escalations,

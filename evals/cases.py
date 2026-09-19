@@ -98,11 +98,8 @@ def expected_route(case: dict) -> Route:
         return "escalate"
     if case["label"] == "ignore":
         # An ignore label on a hand-labelled case means the document settles
-        # it, and only the ground node can reach that conclusion - the rule
-        # engine has no path to 'ignore' at all (docs/rules.md, "The two
-        # outcomes"). Before grounding existed this was unreachable and
-        # review/app.py refused to write such a case; now it names a real
-        # route.
+        # it; only the ground node can reach that conclusion, since the rule
+        # engine has no path to 'ignore' at all.
         return "grounded_ignore"
     return case["label"]
 

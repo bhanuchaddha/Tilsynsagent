@@ -1,18 +1,13 @@
-"""Runs the golden dataset (34 real + N synthetic NOT_COVERED cases) through
-the LLM steps and computes the aggregate scores that become the committed
-baseline in docs/evals/baseline-<date>.md.
+"""Runs the golden dataset (real + synthetic NOT_COVERED cases) through the
+LLM steps and computes the aggregate scores.
 
-`--no-langfuse` is a requirement, not a convenience: it runs identical
-task+scorer code locally and produces the same aggregate a Langfuse
-experiment run would, so the committed number is reproducible by code that
-does not depend on a vendor whose free tier deletes data after 30 days.
+`--no-langfuse` runs identical task+scorer code locally and produces the
+same aggregate a Langfuse experiment run would.
 
-GROQ_MODEL is read at import time by the llm modules - load_dotenv() must
-run, and evals.tasks must be imported, only after argument parsing, inside
-main(). Importing evals.tasks at module level here would read the wrong
-model if a caller sets GROQ_MODEL after importing this file but before
-calling main() (e.g. programmatically) - keeping the import inside main()
-means "run the baseline" and "resolve the model" always happen together.
+GROQ_MODEL is read at import time by the llm modules, so load_dotenv() and
+the evals.tasks import happen inside main(), after argument parsing -
+otherwise a caller setting GROQ_MODEL programmatically before calling
+main() would have it ignored.
 """
 
 from __future__ import annotations
@@ -28,11 +23,10 @@ MAX_CONCURRENCY = 2
 
 def _rule_engine_coverage() -> tuple[float, list[str]]:
     """The precondition gate: apply_rules must reproduce the golden label
-    for every one of the 34 real cases (not the synthetic set, which exists
-    to exercise NOT_COVERED and is expected to route there, not to a
-    file/escalate/ignore label). Always checked against the full 34,
-    independent of --limit. Reported as a precondition, never as the
-    baseline's achievement - see docs/evals/baseline-<date>.md."""
+    for every real case (not the synthetic set, which exists to exercise
+    NOT_COVERED and is expected to route there, not to a
+    file/escalate/ignore label). Checked against the full set, independent
+    of --limit. Reported as a precondition, never as the run's achievement."""
     from evals.cases import load_golden_cases
     from tilsynsagent.rules.engine import apply_rules
 

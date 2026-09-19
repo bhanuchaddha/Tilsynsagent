@@ -15,10 +15,6 @@ dependencies = [
     "langfuse>=4.14,<5",
     "langchain>=1.0",
     "streamlit>=1.38",
-    # Document grounding (src/tilsynsagent/documents/). cryptography is not
-    # optional: real plandata.dk PDFs are AES-encrypted with an empty password,
-    # and pypdf raises DependencyError without it - verified live against a
-    # 30 MB, 61-page document.
     "pypdf>=5.0",
     "cryptography>=3.1",
 ]
@@ -30,7 +26,6 @@ tilsynsagent = "tilsynsagent.cli:main"
 dev = [
     "pytest>=8.3",
     "ruff>=0.7",
-    # Synthetic demo PDFs only (demo/documents.py) - never used at runtime.
     "reportlab>=4.0",
 ]
 

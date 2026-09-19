@@ -40,11 +40,9 @@ class TaskResult:
 
 
 def _with_rate_limit_retry(fn, *, max_attempts: int = 3):
-    """Groq's free tier caps at 8000 TPM per docs/sources.md-adjacent
-    verification (observed live during baseline runs); a burst of
-    concurrent eval calls trips it. One retry with the delay Groq's own
-    error message states is a real operating property of this tier, not a
-    hand-rolled backoff policy - the 429 body names the exact wait."""
+    """Groq's free tier caps at 8000 TPM; a burst of concurrent eval calls
+    can trip it. Retries once using the wait time Groq's own 429 response
+    states."""
     last_exc = None
     for attempt in range(max_attempts):
         try:

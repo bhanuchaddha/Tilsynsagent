@@ -4,8 +4,7 @@ Each write tool declares what it may touch (which tables, which outcome
 values it is allowed to write) and its budget for a single run. A call is
 validated against its tool's declaration before any database write happens;
 a call outside the declared surface, or a run that would exceed its budget,
-is refused rather than attempted. This exists from the first write tool
-rather than being retrofitted onto tools already in use, per the Phase 1 plan.
+is refused rather than attempted.
 """
 
 from __future__ import annotations

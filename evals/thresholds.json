@@ -1,15 +1,11 @@
 {
   "_comment": [
     "The agreed definition of 'good enough', enforced by evals/gate.py in CI.",
-    "Lowering a number here is a reviewable diff in the pull request that needs it -",
-    "that visibility is the point. Never relax a threshold in the same commit that",
-    "breaks it without saying why in the diff.",
+    "Lowering a number here is a reviewable diff in the pull request that needs it.",
     "",
-    "Set from the 2026-09-04 baseline, after the citation-fidelity repair. They sit",
-    "at or just below observed values rather than at a round 1.000, because",
-    "temperature=0 is not a determinism guarantee on a hosted MoE endpoint (see",
-    "docs/evals/baseline-2026-08-22.md's ZL-018 finding) and a gate that fires on",
-    "single-case run-to-run wobble teaches people to ignore it."
+    "Thresholds sit at or just below observed values rather than at a round 1.000,",
+    "because temperature=0 is not a determinism guarantee on a hosted model, and a",
+    "gate that fires on single-case run-to-run wobble teaches people to ignore it."
   ],
 
   "_rule_engine_coverage": [
@@ -27,35 +23,32 @@
 
   "scorers": {
     "_citation_fidelity": [
-      "The project's one rule, tested mechanically. Observed 1.000 across two full",
-      "passes after the prompt v2 repair; the floor allows one case of the 27 to",
-      "wobble without failing CI, and no more."
+      "The project's one rule, tested mechanically. The floor allows one case of the",
+      "27 to wobble without failing CI, and no more."
     ],
     "citation_fidelity": 0.96,
 
     "_no_invented_numbers": [
-      "Observed 1.000 after the scorer boundary fix for sub-area labels."
+      "No numeral in the output may be absent from the record."
     ],
     "no_invented_numbers": 0.96,
 
     "_states_both_values": [
-      "Observed 1.000 in every pass of every baseline recorded so far. This is the",
-      "counterweight to citation_fidelity: a summary that cites perfectly but states",
-      "no values passes there and fails here."
+      "The counterweight to citation_fidelity: a summary that cites perfectly but",
+      "states no values passes there and fails here."
     ],
     "states_both_values": 0.96,
 
     "_did_not_read_the_document": [
-      "The PDF boundary in docs/rules.md, held rather than merely instructed.",
-      "1.000 in every pass ever recorded, and a keyword heuristic besides - a single",
-      "failure here is a real signal, so there is no wobble allowance."
+      "The PDF boundary, held rather than merely instructed. A keyword heuristic,",
+      "so a single failure here is a real signal and there is no wobble allowance."
     ],
     "did_not_read_the_document": 1.0,
 
     "_valid_structured_output": [
-      "Strict JSON schema held. Transient Groq connection errors land here rather",
-      "than on a fidelity scorer, so this floor absorbs one failed call in 27; a",
-      "run with more failures than that exits 2 (inconclusive) before reaching the",
+      "Strict JSON schema held. Transient connection errors land here rather than",
+      "on a fidelity scorer, so this floor absorbs one failed call in 27; a run",
+      "with more failures than that exits 2 (inconclusive) before reaching the",
       "thresholds at all."
     ],
     "valid_structured_output": 0.96

@@ -1,26 +1,7 @@
-"""The nightly run: the vendor-facing half of the feedback loop.
+"""The nightly run: promotes annotated cases, runs the eval dataset, compares
+against the previous run, and writes an alert on regression.
 
-**The deliberate asymmetry with CI.** `.github/workflows/evals.yml` runs the
-gate with no Langfuse keys at all, on purpose: a merge verdict must never
-depend on an observability vendor being reachable, and the number CI enforces
-is text committed in this repository. This job is the opposite. It *is* the
-vendor loop - it reads annotations a person left in Langfuse, promotes them,
-runs the dataset, compares against the previous run, and writes an alert. It
-gets keys because it has nothing to do without them.
-
-Saying that out loud matters more than it looks: it is the difference between
-"we use Langfuse" and "we depend on Langfuse", and a system that cannot
-articulate which of its checks are vendor-independent has not thought about
-what happens when the vendor is down.
-
-**Order matters.** Promotion runs *before* the eval, so cases a person
-labelled today are measured tonight rather than tomorrow. That is what makes
-"a business person labels a run" and "a developer gets an alert" the same
-failure one dataset apart rather than two unrelated events a day apart.
-
-Invoked by `tilsynsagent nightly` and by `.github/workflows/nightly.yml` -
-both, with no logic duplicated into the workflow file, so what CI runs is
-what a person can run by hand.
+Invoked by `tilsynsagent nightly`, called from `.github/workflows/nightly.yml`.
 """
 
 from __future__ import annotations
@@ -41,13 +22,9 @@ def run_nightly(
     judge: bool = True,
     on: date | None = None,
 ) -> int:
-    """One full nightly pass. Returns a process exit code.
-
-    Exit codes mirror evals/gate.py: 0 = nothing regressed, 1 = a regression
-    was found and an alert was written, 2 = the run could not be completed.
-    A cron can act on the code alone, and an infrastructure failure is never
-    reported as a behaviour change.
-    """
+    """One full nightly pass. Returns a process exit code: 0 = nothing
+    regressed, 1 = a regression was found and an alert was written, 2 = the
+    run could not be completed."""
     from evals.regression import (
         compare_runs,
         load_previous_nightly,
@@ -99,12 +76,8 @@ def run_nightly(
 
 
 def _promote_annotations() -> None:
-    """Promotes anything a person answered since the last run.
-
-    Failure here is logged and the nightly continues: an unreachable
-    annotation queue must not stop the regression check, which is the part
-    that works with no vendor at all.
-    """
+    """Promotes anything a person answered since the last run. Failure here
+    is logged and the nightly continues."""
     try:
         from evals.promote import promote_completed
 
@@ -113,17 +86,12 @@ def _promote_annotations() -> None:
             print(f"promoted {len(written)} annotated run(s) into the dataset: {', '.join(written)}")
         else:
             print("nothing to promote from the annotation queue.")
-    except Exception as exc:  # noqa: BLE001 - see docstring
+    except Exception as exc:  # noqa: BLE001
         logger.warning("promotion step failed, continuing: %s", exc)
 
 
 def _run_eval(*, limit: int | None) -> dict | None:
-    """Runs the full dataset and returns the payload gate.py --out writes.
-
-    Reuses run_baseline's own pass and aggregate functions rather than
-    reimplementing them, so the nightly measures the same thing the gate and
-    the committed baselines do - three entry points, one definition of a run.
-    """
+    """Runs the full dataset and returns the payload gate.py --out writes."""
     try:
         from evals.cases import load_all_cases
         from evals.run_baseline import _aggregate, _rule_engine_coverage, run_pass
@@ -149,12 +117,7 @@ def _run_eval(*, limit: int | None) -> dict | None:
 
 
 def _previous_run(*, exclude: str):
-    """The run to compare against: Langfuse first, committed JSON second.
-
-    Langfuse first because it sees runs this checkout never did. JSON second
-    because Langfuse's free tier forgets after 30 days, and a comparison with
-    no baseline is a green run that measured nothing - see evals/regression.py.
-    """
+    """The run to compare against: Langfuse first, committed JSON second."""
     from evals.regression import load_previous_nightly, previous_run_from_langfuse, summarise_run
 
     from_langfuse = previous_run_from_langfuse()
@@ -172,12 +135,7 @@ def _previous_run(*, exclude: str):
 
 
 def _judge_agreement(*, on: date) -> None:
-    """Measures the judge against human labels and commits the result.
-
-    In the nightly rather than inline because human labels arrive days after
-    the judge scores they are about - measuring agreement at decision time
-    would measure an empty set. See obs/judge.py.
-    """
+    """Measures the judge against human labels and writes the result."""
     try:
         from tilsynsagent.obs.judge import write_agreement_report
 

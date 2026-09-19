@@ -1,20 +1,16 @@
 """WFS client for Plandata.dk and watermark handling.
 
-Endpoint and field names verified live against
-https://geoserver.plandata.dk/geoserver/ows (docs/sources.md). Two things
-learned from that verification that shape this module:
+Endpoint: https://geoserver.plandata.dk/geoserver/ows.
 
-- ``datoopdt`` is millisecond-precision, and distinct sub-areas of the same
-  plan can update within the same or adjacent milliseconds (observed: three
-  sub-areas of one plan updated 130-350ms apart during a bulk import). A CQL
-  ``AFTER`` filter on the exact last-seen timestamp would silently drop any
-  sibling that shares it. The watermark therefore filters with ``>=`` on the
-  last-seen timestamp and the caller is expected to de-duplicate against
-  feature ids already processed for that timestamp - see
-  ``WatermarkStore.seen_at_watermark``.
-- ``resultType=hits`` returns ``numberMatched`` without fetching geometry or
-  properties, which is how the incremental-vs-full verification (Phase 1
-  verification 2) checks its count cheaply.
+``datoopdt`` is millisecond-precision, and distinct sub-areas of the same
+plan can update within the same or adjacent milliseconds. A CQL ``AFTER``
+filter on the exact last-seen timestamp would silently drop any sibling
+that shares it, so the watermark filters with ``>=`` and the caller
+de-duplicates against feature ids already processed for that timestamp -
+see ``WatermarkStore.seen_at_watermark``.
+
+``resultType=hits`` returns ``numberMatched`` without fetching geometry or
+properties, for a cheap count.
 """
 
 from __future__ import annotations

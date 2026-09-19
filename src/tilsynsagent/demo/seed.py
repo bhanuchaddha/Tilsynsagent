@@ -8,7 +8,7 @@ runner.py uses, and lets the agent reach its own outcome. So a seeded filing
 or escalation on screen is the agent's own decision, not a canned row, and a
 seeded escalation is a real interrupt() pause with a resumable thread id.
 
-A handful of each shape (docs/PLAN.md Phase 3):
+A handful of each shape:
   - `file` cases (R2, R3)          -> decides on its own, files
   - `escalate` cases (R1, R4)      -> pauses, waits for a person
   - not_covered_cases.jsonl        -> rules silent, model looks, still pauses
@@ -18,9 +18,8 @@ migrations/003_demo_data.sql) so demo/reset.py can remove it without
 touching live run history.
 
 Feature ids and lokplan_ids are namespaced under DEMO_LOKPLAN_BASE, well
-outside any real plandata.dk lokplan_id observed in the golden dataset
-(max ~11.3M as of Phase 0's provenance sample), so a seed run can never
-collide with a real sub-area.
+outside any real plandata.dk lokplan_id observed in the golden dataset, so
+a seed run can never collide with a real sub-area.
 """
 
 from __future__ import annotations
@@ -42,23 +41,17 @@ from tilsynsagent.sources.plandata import SubAreaRecord
 logger = logging.getLogger("tilsynsagent.demo.seed")
 
 # evals/ is a repo-root package, not part of the installed tilsynsagent
-# package (pyproject.toml only ships src/tilsynsagent) - this project is run
-# from a repo checkout, not pip-installed elsewhere (bhanu/PLAN.md's whole
-# premise). `python -m tilsynsagent.demo.seed` and pytest both put the repo
-# root on sys.path for free; the `tilsynsagent` console script does not,
-# since it runs from .venv/bin/. Inserted here, not at import time in
-# _run_case, so it happens before the deferred `from evals.cases import
-# load_all_cases` below.
+# package. The `tilsynsagent` console script runs from .venv/bin/ and does
+# not get the repo root on sys.path automatically, so it is added here
+# before the deferred `from evals.cases import load_all_cases` below.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Reserved lokplan_id range for demo data - see module docstring.
 DEMO_LOKPLAN_BASE = 900_000_000
 
 # A handful of each shape, picked by rule/origin so the queue shows a
-# realistic mix rather than every case (docs/PLAN.md Phase 3: "small enough
-# to seed in under a minute").
+# realistic mix rather than every case.
 DEMO_CASE_IDS = [
     # file: R2 (value changed), R3 (value gained)
     "ZL-004", "ZL-005", "ZL-009", "ZL-024",
@@ -142,10 +135,8 @@ def _run_case(graph, case: dict, *, doklink: str | None = None) -> str:
 
     thread_after = f"demo-{case['id']}-v2"
     # Tagged "grounded" whenever this case can reach the ground node at all -
-    # the LLM judge (docs/judge-configuration.md) filters on exactly this tag,
-    # and obs/annotation.py walks traces by it to build the queue. A grounded
-    # decision on an untagged trace is invisible to both, which would leave
-    # the only unreviewed decisions with no judge and no queue.
+    # the LLM judge filters on this tag, and obs/annotation.py walks traces
+    # by it to build the review queue.
     tags = ["demo", "grounded"] if doklink else ["demo"]
     result = graph.invoke(
         run_input(after, is_test_data=True),

@@ -1,8 +1,5 @@
-"""Pure-code scorers for LLM output fidelity. Zero LLM-as-judge, deliberately:
-CLAUDE.md's one rule requires every autonomous decision traceable to what
-justified it, and a judge model's verdict is exactly an untraceable decision -
-"the judge said so" is not a citation. Every scorer here is a mechanical check
-against the record the case actually contains.
+"""Pure-code scorers for LLM output fidelity. No LLM-as-judge: every scorer
+here is a mechanical check against the record the case actually contains.
 
 Each scorer takes (case, output) and returns a Score: a 0.0/1.0 value, a name,
 and a comment explaining the verdict - so a failing case is diagnosable from
@@ -21,9 +18,8 @@ from dataclasses import dataclass
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])-?\d+(?:[.,]\d+)?(?![A-Za-z0-9_])")
 
 # Keywords that would only make sense if the model had read prose inside the
-# source PDF rather than citing it - see docs/rules.md's stated boundary:
-# "Anything requiring the source PDF to be read; the agent works from the
-# register and cites the document, it does not interpret it."
+# source PDF rather than citing it - the agent works from the register and
+# cites the document, it does not interpret it.
 _DOCUMENT_READING_PHRASES = (
     "according to the document",
     "the document states",
@@ -194,28 +190,14 @@ UNGROUNDED_ROUTES = frozenset({"file", "escalate", "not_covered"})
 
 
 def did_not_read_the_document(case: dict, output: str, *, route: str | None = None) -> Score:
-    """The PDF boundary in docs/rules.md is held on the routes that still have
-    one - a keyword heuristic, stated as a floor rather than a proof.
+    """A keyword heuristic checking the PDF boundary is held on the routes
+    that have one.
 
-    **This scorer is route-scoped, and that scoping is the whole point.**
-    It was written when no code path in this system opened a PDF: the agent
-    worked from the register and cited the document without reading it, so an
-    output claiming otherwise was evidence the model had invented content.
-
-    Grounding made that claim true on one route. A grounded decision quotes a
-    clause out of the document; saying so is not a violation, it is the
-    deliverable. Applying this scorer there would score correct behaviour at
-    0.0 against a threshold pinned at 1.0, and CI would go red looking like a
-    model regression while the actual fault was a scorer whose premise had
-    expired.
-
-    It is scoped rather than deleted because on every *other* route the
-    premise still holds exactly as before. The ungrounded paths - a
-    rule-decided filing, a rule-decided escalation, an assess() call - still
-    have no access to the PDF's prose, and a claim to have read it there is
-    still the fabrication this was built to catch. Deleting it would trade a
-    real check for the convenience of not having to think about which route
-    an output came from.
+    Route-scoped: the ungrounded paths (a rule-decided filing, a
+    rule-decided escalation, an assess() call) have no access to the PDF's
+    prose, so a claim to have read it there is a fabrication. A grounded
+    decision, by contrast, legitimately quotes a clause out of the document,
+    so the check does not apply on that route.
 
     ``route=None`` applies the check, so a caller that has not thought about
     routes gets the stricter behaviour rather than a silent pass.
@@ -238,9 +220,7 @@ def did_not_read_the_document(case: dict, output: str, *, route: str | None = No
 
 
 def valid_structured_output(case: dict, output: object, *, error: str | None = None) -> Score:
-    """Strict JSON schema held for this call. Phase 1 verified schema
-    strictness with one call; this scorer is what turns each of the 34+N
-    replays into a real sample of that claim rather than repeating it once."""
+    """Strict JSON schema held for this call."""
     if error is not None:
         return Score("valid_structured_output", 0.0, f"structured output failed: {error}")
     return Score("valid_structured_output", 1.0, "structured output validated")

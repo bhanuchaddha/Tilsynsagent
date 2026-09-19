@@ -1,33 +1,12 @@
-"""Alerts: writing down that something got worse, where it will still be
-readable in six months.
+"""Writes alert files recording that something got worse, committed to the
+repo so they outlive any observability vendor's retention window.
 
-**Why files in docs/alerts/ and not Slack.** Two reasons, and the second
-is the real one.
+A repeat alert on the same day, for the same kind and subject, appends a
+timestamped occurrence to the existing file instead of creating a new one.
 
-The first is that a webhook is a dependency with no offline story - the same
-argument that keeps the eval gate free of Langfuse. The second is that
-Langfuse's free tier retains data for 30 days, so anything that must outlive
-that has to be committed into the repository at the moment it happens
-(CLAUDE.md, on the observability stack). A Slack message about a regression
-is gone from the record long before anyone asks "has this happened before?".
-A file in ``docs/alerts/`` is in the git history forever, next to the
-commit that fixed it.
-
-**Idempotency is the property that makes this usable at all.** A nightly job
-that fires on a persistent regression will fire again tomorrow, and the day
-after. If each firing created a new file, a week of a known-but-unfixed
-problem would bury the directory in near-identical documents and destroy
-exactly the value the directory has - that a person can look at it and see
-what has gone wrong with this system. So a repeat alert on the same day, for
-the same kind and subject, **appends a timestamped occurrence** to the file
-that already exists.
-
-**Two audiences, two functions.** ``business_alert`` is fired by the drift
-detector at production quality; it names a scorer, a rate, and a window, and
-points at the annotation queue where a person can label the runs. It never
-mentions code. ``developer_alert`` is fired by the nightly regression run
-against the previous run; it names cases and prompt versions. They are the
-same failure seen one dataset apart, and saying so is the point of the pair.
+``business_alert`` is fired on a production quality drop and points at the
+annotation queue. ``developer_alert`` is fired by the nightly regression
+run and names cases and prompt versions.
 """
 
 from __future__ import annotations
@@ -39,12 +18,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-ALERTS_DIR = Path(__file__).resolve().parents[3] / "docs" / "alerts"
+ALERTS_DIR = Path(__file__).resolve().parents[3] / "var" / "alerts"
 
-# A demo alert's filename starts with this. demo/reset.py deletes by that
-# prefix alone - the naming scheme, agreed here at write time, is what lets a
-# reset distinguish a demo artefact from a real alert without reading and
-# interpreting the file. A real alert is never removable by a reset.
+# demo/reset.py deletes files by this prefix alone.
 DEMO_PREFIX = "demo-"
 
 
@@ -54,8 +30,7 @@ def _slug(text: str) -> str:
 
 
 def alert_path(*, kind: str, subject: str, on: date | None = None, demo: bool = False) -> Path:
-    """``docs/alerts/<date>-<kind>-<slug>.md``, matching the directory's
-    existing one-file-per-alert convention."""
+    """``var/alerts/<date>-<kind>-<slug>.md``."""
     on = on or date.today()
     prefix = DEMO_PREFIX if demo else ""
     return ALERTS_DIR / f"{prefix}{on.isoformat()}-{_slug(kind)}-{_slug(subject)}.md"
@@ -73,9 +48,7 @@ def write_alert(
 ) -> Path:
     """Writes an alert, or appends an occurrence to today's existing one.
 
-    Returns the path either way. Never raises: an alerting path that crashes
-    is worse than one that reports nothing, because the crash takes down the
-    nightly run that was carrying the actual finding.
+    Returns the path either way. Never raises on a write failure.
     """
     path = alert_path(kind=kind, subject=subject, on=on, demo=demo)
     if directory is not None:
@@ -85,10 +58,6 @@ def write_alert(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            # A repeat. Appended rather than rewritten, so the file shows how
-            # long the problem persisted - which is information the first
-            # occurrence alone does not carry, and is usually the first thing
-            # anyone asks.
             with open(path, "a") as f:
                 f.write(f"\n## Recurrence — {stamp}\n\n{body.strip()}\n")
         else:
@@ -97,7 +66,7 @@ def write_alert(
                 f"*Opened {stamp} by `tilsynsagent` — {kind}.*\n\n"
                 f"{body.strip()}\n"
             )
-    except OSError as exc:  # pragma: no cover - see docstring
+    except OSError as exc:  # pragma: no cover
         logger.warning("alert %s could not be written: %s", path, exc)
     return path
 
@@ -113,12 +82,7 @@ def business_alert(
     directory: Path | None = None,
 ) -> Path:
     """Production quality dropped on live decisions. Written for someone who
-    will never open the code.
-
-    Deliberately says nothing about prompts, versions or cases. The person
-    this is for can do exactly one thing about it, and it is the most
-    valuable thing anyone can do: look at the flagged runs and say whether
-    the agent was right. Everything else is the developer alert's job.
+    will never open the code; says nothing about prompts, versions or cases.
     """
     body = f"""\
 ## What happened
@@ -175,13 +139,9 @@ def developer_alert(
 ) -> Path:
     """The nightly eval regressed against the previous run.
 
-    Separates **new cases** from **newly failing cases**, because telling
-    those apart is the entire developer workflow and an aggregate score
-    cannot. A new case that fails is the dataset doing its job - a failure
-    somebody labelled precisely because the agent got it wrong. A case that
-    used to pass and now fails is a regression in the agent. The response to
-    each is opposite: fix the agent, or accept the case and fix the agent.
-    Reporting only "0.94 -> 0.86" makes them indistinguishable.
+    Separates new cases (a failure the dataset gained on purpose) from
+    newly failing cases (a real regression) since they call for opposite
+    responses.
     """
     prompt_versions = prompt_versions or {}
     previous_prompt_versions = previous_prompt_versions or {}
@@ -224,8 +184,7 @@ These are regressions. The dataset did not change; the behaviour did.
 
 If a prompt is at fault, the fix is a new version in Langfuse with the
 `production` label moved to it. That takes effect within the prompt cache TTL
-and requires no code change and no deploy — see `docs/rollback-2026-09-04.md`
-for the measured figure.
+and requires no code change and no deploy.
 """
     return write_alert(
         kind="eval-regression",
@@ -242,14 +201,7 @@ def _bullets(items: list[str]) -> str:
 
 
 def _scorer_in_plain_language(scorer: str) -> str:
-    """What a scorer means, for a reader who has never seen the code.
-
-    Kept here rather than alongside each scorer because the audiences are
-    different: the scorer's own docstring explains it to whoever maintains
-    it, and this explains it to whoever has to act on it. Written out for
-    each rather than generated, because a generic sentence ("the check
-    `clause_is_verbatim` failed") is exactly the alert people learn to ignore.
-    """
+    """What a scorer means, for a reader who has never seen the code."""
     return {
         "clause_is_verbatim": (
             "When the agent decides something by reading the plan document, it must "
@@ -289,11 +241,7 @@ def _scorer_in_plain_language(scorer: str) -> str:
 
 
 def open_alerts(*, directory: Path | None = None) -> list[dict]:
-    """Every alert file on disk, newest first - what the operator view reads.
-
-    Returns dicts rather than paths so the UI helper needs no filesystem
-    knowledge and is testable without Streamlit (see review/repo.py).
-    """
+    """Every alert file on disk, newest first."""
     directory = directory or ALERTS_DIR
     if not directory.exists():
         return []

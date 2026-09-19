@@ -1,18 +1,7 @@
 """Data shaping for the review UI, with no Streamlit in it.
 
-**Why this module exists.** Streamlit executes the whole script top to bottom
-on every interaction, including every tab body whether or not it is visible,
-which means two things constrain anything added to `review/app.py`:
-
-1. Queries must stay narrow, because they all run on every rerun.
-2. Logic in a `st.*`-shaped function cannot be tested - this repo has no way
-   to render Streamlit components, so anything that matters must live where a
-   plain unit test can reach it.
-
-So every non-trivial decision the new tabs make - what counts as a
-regression, which alerts are open, how a grounding rate reads in words - is a
-pure function here, and `app.py` only arranges the results on screen. Same
-pattern as `db/repo.py`'s `status_counts`, for the same reason.
+Logic that needs to be unit-tested lives here as plain functions; `app.py`
+only arranges the results on screen.
 """
 
 from __future__ import annotations
@@ -22,16 +11,12 @@ from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-NIGHTLY_DIR = REPO_ROOT / "docs" / "evals" / "nightly"
+NIGHTLY_DIR = REPO_ROOT / "var" / "evals" / "nightly"
 
 
 def langfuse_trace_url(base_url: str | None, trace_id: str) -> str | None:
-    """A deep link to one trace in the Langfuse UI.
-
-    Returns None without a base URL rather than guessing at one: a link that
-    404s in front of an audience is worse than a plain trace id they can paste
-    into a search box.
-    """
+    """A deep link to one trace in the Langfuse UI. Returns None without a
+    base URL rather than guessing at one."""
     if not base_url or not trace_id:
         return None
     return f"{base_url.rstrip('/')}/trace/{trace_id}"
@@ -110,7 +95,7 @@ def latest_comparison(*, directory: Path | None = None):
     return compare_runs(current, previous)
 
 
-def flagged_grounded_runs(groundings: list[dict]) -> list[dict]:
+def flagged_grounded_runs(groundings: list[dict], *, document_text=None) -> list[dict]:
     """Grounded decisions whose evidence fails a code check, re-run here.
 
     The Business tab shows these as cards. Re-scored from the stored row
@@ -118,31 +103,87 @@ def flagged_grounded_runs(groundings: list[dict]) -> list[dict]:
     reachable and renders in one query - see this module's docstring on
     Streamlit reruns.
 
-    ``clause_is_verbatim`` is not among the checks run here: verifying a quote
-    needs the document text, which means a fetch per card, and a tab body that
-    executes on every rerun must not do that. Those failures reach this screen
-    through the alert file and the queue instead.
+    ``document_text`` is a callable taking a doklink and returning that
+    document's text, or None to skip every check that needs one. It exists
+    because stage 1 moved the clause checks from a retrieved subset to the
+    full document, so ``clause_id_exists`` now needs the source. The caller
+    supplies a cached reader (review/app.py memoises one per render) rather
+    than this module fetching per card: a tab body executes on every
+    Streamlit rerun and a 30 MB fetch per card would make the screen unusable.
+
+    With no reader, clause-cited rows are still checked for structural
+    completeness and for whether the quote is about the changed field, and
+    field-cited rows are fully checked against the stored record - those need
+    nothing but the row. What is lost without a reader is fabrication
+    detection on clause citations, which is worth being explicit about rather
+    than quietly dropping.
     """
     from tilsynsagent.obs.grounded import (
+        abstained_when_ungrounded,
         clause_id_exists,
+        clause_is_verbatim,
+        field_citation_is_real,
         quote_mentions_the_changed_field,
     )
 
     flagged = []
     for row in groundings:
-        retrieved = row.get("retrieved_clause_ids") or []
-        if isinstance(retrieved, str):
-            retrieved = json.loads(retrieved)
+        citation_kind = row.get("citation_kind") or "clause"
         scores = [
-            clause_id_exists(clause_id=row["clause_id"], retrieved_clause_ids=retrieved),
-            quote_mentions_the_changed_field(
-                clause_quote=row["clause_quote"], changed_fields=row.get("changed_fields") or {}
-            ),
+            abstained_when_ungrounded(
+                grounded=True,
+                outcome=row.get("outcome") or "",
+                citation_kind=citation_kind,
+                clause_id=row.get("clause_id") or "",
+                clause_quote=row.get("clause_quote") or "",
+                field_name=row.get("field_name") or "",
+                field_before=row.get("field_before") or "",
+                field_after=row.get("field_after") or "",
+            )
         ]
+        if citation_kind == "clause":
+            scores.append(
+                quote_mentions_the_changed_field(
+                    clause_quote=row.get("clause_quote") or "",
+                    changed_fields=row.get("changed_fields") or {},
+                )
+            )
+            if document_text is not None:
+                text = document_text(row.get("doklink") or "")
+                scores.extend(
+                    [
+                        clause_id_exists(
+                            clause_id=row.get("clause_id") or "", document_text=text
+                        ),
+                        clause_is_verbatim(
+                            clause_quote=row.get("clause_quote") or "", document_text=text
+                        ),
+                    ]
+                )
+        elif citation_kind == "field":
+            scores.append(
+                field_citation_is_real(
+                    field_name=row.get("field_name") or "",
+                    field_before=row.get("field_before") or "",
+                    field_after=row.get("field_after") or "",
+                    before=_as_dict(row.get("before")),
+                    after=_as_dict(row.get("after")),
+                )
+            )
         failing = [s for s in scores if s.value < 1.0]
         if failing:
             flagged.append({**row, "failing": [(s.name, s.comment) for s in failing]})
     return flagged
+
+
+def _as_dict(value) -> dict:
+    """A JSONB column that psycopg may hand back as a dict or as a string."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return {}
+    return value or {}
 
 
 def alert_summary(alerts: list[dict]) -> dict:

@@ -135,38 +135,51 @@ def insert_grounding(
     conn: psycopg.Connection,
     *,
     diff_id: int,
+    citation_kind: str,
     clause_id: str,
     clause_quote: str,
+    field_name: str,
+    field_before: str,
+    field_after: str,
     reasoning: str,
     outcome: str,
     document_page_count: int | None,
-    retrieved_clause_ids: list[str],
+    document_chars: int | None,
 ) -> int:
-    """Records what the document said for a grounded decision.
+    """Records what justified a grounded decision - a clause or a field.
 
     Idempotent on diff_id (UNIQUE in the schema) for the same reason
     insert_diff and insert_escalation are - see insert_diff's docstring. A
     grounded run does not interrupt, but it shares the re-execution surface
     of every other node, and a UniqueViolation on a retry would turn a
     recoverable re-run into a failed one.
+
+    The schema's groundings_citation_is_complete CHECK (migration 005) is the
+    last gate on a half-filled citation. actions/ground.py refuses one before
+    getting here; this is what makes that refusal unbypassable.
     """
     row = conn.execute(
         """
         INSERT INTO groundings
-            (diff_id, clause_id, clause_quote, reasoning, outcome,
-             document_page_count, retrieved_clause_ids)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (diff_id, citation_kind, clause_id, clause_quote,
+             field_name, field_before, field_after, reasoning, outcome,
+             document_page_count, document_chars)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (diff_id) DO UPDATE SET diff_id = EXCLUDED.diff_id
         RETURNING id
         """,
         (
             diff_id,
+            citation_kind,
             clause_id,
             clause_quote,
+            field_name,
+            field_before,
+            field_after,
             reasoning,
             outcome,
             document_page_count,
-            json.dumps(retrieved_clause_ids),
+            document_chars,
         ),
     ).fetchone()
     return row[0]
@@ -412,20 +425,32 @@ def grounding_stats(conn: psycopg.Connection) -> dict:
 
 
 def recent_groundings(conn: psycopg.Connection, limit: int = 25) -> list[dict]:
-    """Recent grounded decisions with the clause each rests on - the cards the
-    Business tab shows. Newest first."""
+    """Recent grounded decisions with the source each rests on - the cards the
+    Business tab shows. Newest first.
+
+    The before and after versions are selected as JSON, not only joined, so a
+    field-cited decision can be checked against the record it claims to read
+    without a second query per card (review/repo.py's flagged_grounded_runs).
+    The before version is LEFT JOINed: a sub-area's first sighting has none,
+    and a row that cites a field on a first sighting should surface as a
+    failing check rather than vanish from the screen.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT g.id AS grounding_id, g.clause_id, g.clause_quote, g.reasoning,
-                   g.outcome, g.retrieved_clause_ids, g.document_page_count, g.grounded_at,
+                   g.outcome, g.citation_kind, g.field_name, g.field_before,
+                   g.field_after, g.document_page_count, g.document_chars, g.grounded_at,
                    d.id AS diff_id, d.changed_fields,
                    s.kommunenavn, s.komnr, s.lokplan_id, s.delnr, s.is_test_data,
-                   av.doklink
+                   av.doklink,
+                   to_jsonb(bv) - 'id' - 'sub_area_id' AS before,
+                   to_jsonb(av) - 'id' - 'sub_area_id' AS after
             FROM groundings g
             JOIN diffs d ON d.id = g.diff_id
             JOIN sub_areas s ON s.id = d.sub_area_id
             JOIN sub_area_versions av ON av.id = d.after_version_id
+            LEFT JOIN sub_area_versions bv ON bv.id = d.before_version_id
             ORDER BY g.grounded_at DESC
             LIMIT %s
             """,

@@ -1,32 +1,16 @@
 """Prompt registry: the prompts assess() and summarise() send are fetched
 from Langfuse prompt management, not read from Python constants.
 
-**Why this exists.** A prompt edit changes the system's behaviour exactly as
-much as a code change does, but it does not look like one: it ships as a
-string literal in a diff nobody can evaluate by reading. Putting prompts in a
-registry outside the code deploy buys three things this project needs:
+This gives every decision a recorded prompt version, lets a rollback happen
+by moving the ``production`` label to an earlier version with no deploy, and
+lets eval runs compare against a recorded prompt/model pair.
 
-1. **A version on every decision.** The resolved prompt version is recorded
-   on the trace and on every eval result, so "which prompt produced this
-   filing?" is answerable after the fact - the one rule, applied to the
-   prompt itself.
-2. **Rollback without a deploy.** Moving the ``production`` label back to an
-   earlier version changes behaviour in seconds and is timeable. Redeploying
-   code to undo a prompt edit is not the same operation and does not
-   demonstrate the same thing.
-3. **Experiment-vs-experiment comparison.** An eval score means nothing on
-   its own; it means something against another run whose prompt version and
-   model are both recorded.
-
-**The fallback is not optional.** Every prompt here has a pinned local
-default (``FALLBACKS``), used when Langfuse is unconfigured, unreachable, or
-does not yet have the prompt. An agent that stops deciding because an
-observability vendor is down has traded one failure mode for a worse one -
-and the offline test suite must run with no network and no keys at all.
+Every prompt has a pinned local default (``FALLBACKS``), used when Langfuse
+is unconfigured, unreachable, or does not yet have the prompt, so the agent
+keeps deciding and the offline test suite runs with no network and no keys.
 
 Fetches are cached by the Langfuse SDK itself (``cache_ttl_seconds``), which
-also serves the last-known-good version if a later refresh fails, so a normal
-run does not pay a network round-trip per call.
+also serves the last-known-good version if a later refresh fails.
 """
 
 from __future__ import annotations
@@ -43,11 +27,7 @@ logger = logging.getLogger(__name__)
 # version in Langfuse; nothing here changes and nothing redeploys.
 PRODUCTION_LABEL = "production"
 
-# How long a fetched prompt stays cached in-process. Long enough that a batch
-# run does not re-fetch per case, short enough that a rollback takes effect on
-# a schedule measured in seconds rather than requiring a restart. The measured
-# rollback in docs/ is taken against this number, so changing it changes that
-# published figure.
+# How long a fetched prompt stays cached in-process before a rollback takes effect.
 CACHE_TTL_SECONDS = 60
 
 ASSESS_PROMPT_NAME = "tilsynsagent-assess-system"
@@ -55,10 +35,7 @@ SUMMARISE_PROMPT_NAME = "tilsynsagent-summarise-system"
 GROUND_PROMPT_NAME = "tilsynsagent-ground-system"
 
 
-# The pinned defaults. These are the exact strings that were in assess.py and
-# summarise.py before the registry existed, and they are what
-# `prompts.py --push` seeds Langfuse with, so version 1 in the registry and
-# the fallback here are the same text by construction.
+# The pinned defaults, also what `prompts.py --push` seeds Langfuse with.
 FALLBACKS: dict[str, str] = {
     ASSESS_PROMPT_NAME: """\
 You assess changes to the Danish local-plan register (Plandata.dk) that the \
@@ -70,14 +47,6 @@ Ground every statement in the before/after values and the rule set boundary \
 given to you. Do not speculate about intent, and do not invent facts not in \
 the record. If the source document is not available to you, say so rather \
 than guessing its contents - you cite it, you do not read it.""",
-    # v2 of this prompt. The two numbered requirements were added to repair
-    # the citation-fidelity regression the 2026-08-29 baseline recorded:
-    # citation_fidelity 0.704 across 27 LLM cases, because the model
-    # paraphrased its citation ("as documented in the plan PDF") instead of
-    # quoting the URL. The failure was systematic, not flaky - 7 of 8 failing
-    # cases failed in all three stability passes - and concentrated in the
-    # short R3 summaries that rule-set v2 newly routes to file. Measured back
-    # to 1.000 over two full passes; see docs/evals/baseline-2026-09-04.md.
     SUMMARISE_PROMPT_NAME: """\
 You write a short, factual record of a change that has already been filed as \
 significant. The decision is made; your job is only to state clearly what \
@@ -113,35 +82,43 @@ what justified the decision.""",
     #    8,5 to 8.5 fails. That scorer is what makes a grounded decision
     #    checkable by code rather than by trust, and demo 1 removes this
     #    paragraph on purpose to show the scorer catching it.
+    # v2 of this prompt, replacing the clause-retrieval contract. The 2026-09-06
+    # baseline measured v1 at **0 grounded decisions out of 5** on real
+    # documents: retrieval worked and returned real clauses, but four of the
+    # five abstentions said the before->after map was empty so no clause could
+    # govern a change that was not there. That was structural - the
+    # not-covered route is by definition the one where all five watched fields
+    # are identical - so the prompt now says plainly that the rules already
+    # looked at those five and declined, and that the change is elsewhere.
     GROUND_PROMPT_NAME: """\
-You are reading numbered clauses from a Danish local plan (lokalplan) to \
-settle one question about a change to the plan register that the written \
-rule set does not cover: does the reader now see something on this land that \
-they could not see before?
+You are settling one question about a change to the Danish local-plan \
+register (Plandata.dk) that the written rule set does not cover: does the \
+reader now see something on this land that they could not see before?
 
-You are given the change (before -> after values from the register) and a \
-small number of numbered clauses retrieved from the plan document itself.
+You are given the whole register record in both versions, and the full text \
+of the plan document.
+
+**The five watched fields will often be identical in both versions. That is \
+normal and it is why you are here.** The rule set examined those five and \
+declined; it does not mean nothing changed. It means whatever changed is \
+somewhere else - in another register field, or in the document text. Never \
+answer that there is nothing to decide because the watched fields match. \
+Look at the rest of the record and at the document.
 
 Decide one of three things:
 
-- **file** - a clause you can quote governs the changed field and shows the \
-change is something a reader of this land would want to know about.
-- **ignore** - a clause you can quote governs the changed field and shows \
-there is nothing new for a reader to see. This is a positive claim backed by \
-a clause, not a shrug.
+- **file** - the document or a register field shows a change a reader of \
+this land would want to know about.
+- **ignore** - the document or a register field shows there is nothing new \
+for a reader to see. This is a positive claim backed by a source, not a shrug.
 - **cannot decide** - set can_decide to false.
 
-Set can_decide to false whenever no clause you were given actually governs \
-the changed field. That is the correct answer, not a failure: the case then \
-goes to a person, which is what should happen when the document does not \
-settle it. Do not stretch a clause that is merely nearby, merely about the \
-same building, or merely plausible. If the clauses you were given are about \
-something else, say so by abstaining.
+When you can decide, name exactly one source in citation_kind.
 
-When you can decide, both of these are required:
+**citation_kind "clause"** - a clause in the document settles it. Then:
 
-1. **clause_id** must be the number of a clause you were actually given \
-(for example "6.3"). Never a clause number you did not see.
+1. **clause_id** must be the number of a clause that appears in the document \
+text you were given (for example "6.3"). Never a number you did not see.
 2. **clause_quote** must be copied character for character out of that \
 clause - the sentence that settles the question, and nothing you have \
 rewritten. Do not correct spelling, do not convert a Danish decimal comma \
@@ -149,8 +126,35 @@ rewritten. Do not correct spelling, do not convert a Danish decimal comma \
 quote that has been tidied is not a quote, and a reader checking your \
 decision against the document will not find it.
 
-Never decide from the register values alone. If the clauses do not say it, \
-you do not know it.""",
+**citation_kind "field"** - a register field settles it, and no clause is \
+needed because none was relied on. Then **field_name**, **field_before** and \
+**field_after** must be that field and its two values, copied from the \
+record. For example status changing from F (Forslag, proposed) to V \
+(Vedtaget, adopted) means the plan was formally adopted.
+
+**When both a clause and a field would serve, you must choose "clause".** The \
+document is the more specific source and the one a reader can check against \
+the published plan. Only use "field" when nothing in the document text \
+settles the question and a register field does.
+
+**findings is only for an abstention. Leave it empty whenever can_decide is \
+true** - a decision explains itself in reasoning, and duplicating that text \
+into findings tells the reader nothing they are not already being shown.
+
+**When you cannot decide**, set can_decide to false and fill in **findings**: \
+the clauses and fields that bear on this change, quoted with their ids, then \
+why they do not settle it. Write what you *found*, not what was missing. \
+"Clause 6.2 sets a maximum height of 8,5 m and clause 9.2 governs terrain \
+regulation; neither states whether the adopted plan changes the permitted \
+storey count, which is what moved here" is useful to the person who picks \
+this up. "The document does not cover this" is not. A person will read your \
+findings and decide from them, so they are the work, not an apology for \
+not deciding.
+
+Abstaining is the correct answer whenever nothing genuinely settles the \
+question - the case then goes to a person, which is what should happen. Do \
+not stretch a clause that is merely nearby, merely about the same building, \
+or merely plausible.""",
 }
 
 

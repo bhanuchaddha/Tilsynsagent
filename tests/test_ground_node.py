@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from tilsynsagent import graph as g
-from tilsynsagent.documents.clauses import Clause
 from tilsynsagent.llm.ground import Grounding
 
 RECORD = {
@@ -31,11 +30,16 @@ RECORD = {
 }
 CLAUSE_TEXT = "6.2 Bebyggelse må ikke opføres med en større højde end 8,5 m."
 
+BEFORE = {**RECORD, "versionsnr": 1, "status": "Forslag"}
+
 
 def _state(**over):
     return {
         "record": RECORD,
-        "changed_fields": {"maxbygnhjd": {"before": 8.5, "after": 8.5}},
+        # Empty by definition on the not-covered route: no watched field changed.
+        "changed_fields": {},
+        "before": BEFORE,
+        "after": RECORD,
         "sub_area_id": 1,
         "before_version_id": 1,
         "after_version_id": 2,
@@ -43,6 +47,30 @@ def _state(**over):
         "rule_reason": "no rule fired",
         **over,
     }
+
+
+def _grounding(**over) -> Grounding:
+    """A Grounding with every required field filled, overridable per test.
+
+    The schema is strict and has ten fields; spelling all of them out in
+    every test buries the one thing each test is actually about.
+    """
+    return Grounding(
+        **{
+            "can_decide": False,
+            "outcome": "",
+            "citation_kind": "",
+            "clause_id": "",
+            "clause_quote": "",
+            "field_name": "",
+            "field_before": "",
+            "field_after": "",
+            "findings": "",
+            "reasoning": "r",
+            "citation": "u",
+            **over,
+        }
+    )
 
 
 # --- the router ------------------------------------------------------------
@@ -92,24 +120,6 @@ def test_an_unextractable_document_cannot_ground(monkeypatch):
     assert out["document_page_count"] == 9
 
 
-def test_an_empty_retrieval_costs_no_model_call(monkeypatch):
-    """The first three abstentions are decided in code. A run that cannot
-    read its document must not spend tokens discovering that."""
-    from tilsynsagent.documents.cache import FetchResult
-    from tilsynsagent.documents.extract import ExtractResult
-
-    called = []
-    monkeypatch.setattr(g, "fetch_document", lambda *a, **k: FetchResult("u", content=b"x"))
-    monkeypatch.setattr(g, "extract_text", lambda _c: ExtractResult(text="t", page_count=5))
-    monkeypatch.setattr(g, "split_clauses", lambda _t: [Clause("1.1", "1.1 noget")])
-    monkeypatch.setattr(g, "retrieve_for_fields", lambda *a, **k: [])
-    monkeypatch.setattr(g, "ground", lambda **k: called.append(1))
-
-    out = g._ground_node(_state())
-    assert out["grounded"] is False
-    assert called == []
-    assert out["document_available"] is True
-
 
 def _wire(monkeypatch, grounding: Grounding):
     from tilsynsagent.documents.cache import FetchResult
@@ -118,29 +128,27 @@ def _wire(monkeypatch, grounding: Grounding):
     monkeypatch.setattr(
         g, "fetch_document", lambda *a, **k: FetchResult("u", content=b"x", cache_hit=True)
     )
-    monkeypatch.setattr(g, "extract_text", lambda _c: ExtractResult(text="t", page_count=41))
-    monkeypatch.setattr(g, "split_clauses", lambda _t: [Clause("6.2", CLAUSE_TEXT)])
-    monkeypatch.setattr(g, "retrieve_for_fields", lambda *a, **k: [Clause("6.2", CLAUSE_TEXT)])
+    monkeypatch.setattr(
+        g, "extract_text", lambda _c: ExtractResult(text=CLAUSE_TEXT, page_count=41)
+    )
     monkeypatch.setattr(g, "ground", lambda **k: grounding)
     monkeypatch.setattr(g, "take_last_usage", lambda: None)
 
 
-def test_a_model_abstention_escalates_with_its_reasoning(monkeypatch):
+def test_a_model_abstention_escalates_with_what_it_found(monkeypatch):
+    """An abstention hands over a reading, not an apology. findings is what
+    the person picking this up starts from - see improvement 6."""
     _wire(
         monkeypatch,
-        Grounding(
-            can_decide=False,
-            outcome="",
-            clause_id="",
-            clause_quote="",
-            reasoning="No clause covers storeys.",
-            citation="u",
+        _grounding(
+            findings="Clause 6.2 sets a maximum height of 8,5 m.",
+            reasoning="Neither states whether the storey count changed.",
         ),
     )
     out = g._ground_node(_state())
     assert out["grounded"] is False
-    assert out["grounded_reasoning"] == "No clause covers storeys."
-    assert out["retrieved_clause_ids"] == ["6.2"]
+    assert out["grounded_findings"] == "Clause 6.2 sets a maximum height of 8,5 m."
+    assert out["grounded_reasoning"] == "Neither states whether the storey count changed."
 
 
 def test_a_decision_without_checkable_evidence_is_treated_as_abstention(monkeypatch):
@@ -148,13 +156,32 @@ def test_a_decision_without_checkable_evidence_is_treated_as_abstention(monkeypa
     act on - an uncheckable autonomous decision is what the one rule forbids."""
     _wire(
         monkeypatch,
-        Grounding(
+        _grounding(can_decide=True, outcome="file", citation_kind="clause"),
+    )
+    assert g._ground_node(_state())["grounded"] is False
+
+
+def test_a_field_citation_missing_its_values_is_an_abstention(monkeypatch):
+    """The field path must not be the loose one. A named field with neither
+    a before nor an after value is as uncheckable as a missing quote."""
+    _wire(
+        monkeypatch,
+        _grounding(
+            can_decide=True, outcome="file", citation_kind="field", field_name="status"
+        ),
+    )
+    assert g._ground_node(_state())["grounded"] is False
+
+
+def test_an_unknown_citation_kind_is_an_abstention(monkeypatch):
+    _wire(
+        monkeypatch,
+        _grounding(
             can_decide=True,
             outcome="file",
-            clause_id="",
-            clause_quote="",
-            reasoning="r",
-            citation="u",
+            citation_kind="vibes",
+            clause_id="6.2",
+            clause_quote="q",
         ),
     )
     assert g._ground_node(_state())["grounded"] is False
@@ -163,13 +190,12 @@ def test_a_decision_without_checkable_evidence_is_treated_as_abstention(monkeypa
 def test_an_outcome_outside_the_permitted_set_is_an_abstention(monkeypatch):
     _wire(
         monkeypatch,
-        Grounding(
+        _grounding(
             can_decide=True,
             outcome="escalate",
+            citation_kind="clause",
             clause_id="6.2",
             clause_quote="x",
-            reasoning="r",
-            citation="u",
         ),
     )
     assert g._ground_node(_state())["grounded"] is False
@@ -179,18 +205,19 @@ def test_an_outcome_outside_the_permitted_set_is_an_abstention(monkeypatch):
 def test_a_good_grounding_carries_its_evidence_into_state(monkeypatch, outcome):
     _wire(
         monkeypatch,
-        Grounding(
+        _grounding(
             can_decide=True,
             outcome=outcome,
+            citation_kind="clause",
             clause_id="6.2",
             clause_quote="højde end 8,5 m",
             reasoning="Clause 6.2 settles it.",
-            citation="u",
         ),
     )
     out = g._ground_node(_state())
     assert out["grounded"] is True
     assert out["grounded_outcome"] == outcome
+    assert out["grounded_citation_kind"] == "clause"
     assert out["grounded_clause_id"] == "6.2"
     assert out["grounded_clause_quote"] == "højde end 8,5 m"
     assert out["document_page_count"] == 41
@@ -198,19 +225,71 @@ def test_a_good_grounding_carries_its_evidence_into_state(monkeypatch, outcome):
     assert g._route_after_ground(out) == "grounded"
 
 
-def test_state_stays_msgpack_safe(monkeypatch):
-    """The Postgres checkpointer serialises state via msgpack. A dataclass or
-    a Clause leaking into state would break checkpointing at runtime, not at
-    import - so it is pinned here."""
+@pytest.mark.parametrize("outcome", ["file", "ignore"])
+def test_a_field_cited_grounding_is_acted_on(monkeypatch, outcome):
+    """Demo case 2, and the reason is_decided accepts a field: status F -> V
+    is the plan being formally adopted, and it is a fully traceable source.
+    Before stage 1 this decision was discarded as uncheckable."""
     _wire(
         monkeypatch,
-        Grounding(
+        _grounding(
+            can_decide=True,
+            outcome=outcome,
+            citation_kind="field",
+            field_name="status",
+            field_before="Forslag",
+            field_after="Vedtaget",
+            reasoning="The plan was formally adopted.",
+        ),
+    )
+    out = g._ground_node(_state())
+    assert out["grounded"] is True
+    assert out["grounded_citation_kind"] == "field"
+    assert out["grounded_field_name"] == "status"
+    assert out["grounded_field_before"] == "Forslag"
+    assert out["grounded_field_after"] == "Vedtaget"
+    assert out["grounded_clause_id"] == ""
+    assert g._route_after_ground(out) == "grounded"
+
+
+def test_the_model_sees_the_whole_record_and_the_whole_document(monkeypatch):
+    """The stage 1 change, pinned. The 2026-09-06 baseline measured 0/5
+    grounded because the model was handed an empty diff and four retrieved
+    clauses; it must now receive both full versions and the full text."""
+    from tilsynsagent.documents.cache import FetchResult
+    from tilsynsagent.documents.extract import ExtractResult
+
+    seen = {}
+    monkeypatch.setattr(g, "fetch_document", lambda *a, **k: FetchResult("u", content=b"x"))
+    monkeypatch.setattr(
+        g, "extract_text", lambda _c: ExtractResult(text=CLAUSE_TEXT, page_count=41)
+    )
+    monkeypatch.setattr(g, "take_last_usage", lambda: None)
+    monkeypatch.setattr(
+        g, "ground", lambda **kw: seen.update(kw) or _grounding()
+    )
+
+    g._ground_node(_state())
+    assert seen["document_text"] == CLAUSE_TEXT
+    assert seen["before"]["status"] == "Forslag"
+    assert seen["after"]["status"] == "Vedtaget"
+    # The empty watched diff still reaches the prompt, as context rather than
+    # as the question - build_prompt says so in words.
+    assert seen["watched_changed_fields"] == {}
+
+
+def test_state_stays_msgpack_safe(monkeypatch):
+    """The Postgres checkpointer serialises state via msgpack. A dataclass
+    leaking into state would break checkpointing at runtime, not at import -
+    so it is pinned here."""
+    _wire(
+        monkeypatch,
+        _grounding(
             can_decide=True,
             outcome="file",
+            citation_kind="clause",
             clause_id="6.2",
             clause_quote="q",
-            reasoning="r",
-            citation="u",
         ),
     )
     out = g._ground_node(_state())

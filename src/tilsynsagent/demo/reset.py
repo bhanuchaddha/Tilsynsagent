@@ -127,13 +127,8 @@ def _reset_files() -> dict:
     """Clears the on-disk demo artefacts: generated documents, their cache
     entries, and demo alert files.
 
-    Demo alerts are deleted by *filename*, not by reading their contents:
-    obs/alerts.py names a demo alert with a `demo-` prefix precisely so this
-    function can tell them apart from real alerts without parsing. The
-    committed alert record in docs/alerts/ is a permanent artefact of
-    this project and a reset must never be able to touch it - which means
-    "delete the alerts" has to be a decision made by a naming scheme agreed
-    when the alert is written, not a judgement made at deletion time.
+    Demo alerts are deleted by filename (the `demo-` prefix), never by
+    reading their contents, so a real alert can never be touched by a reset.
     """
     from tilsynsagent.demo.documents import clear_demo_documents, demo_document_dir
     from tilsynsagent.documents.cache import clear_cache

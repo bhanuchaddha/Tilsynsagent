@@ -1,45 +1,15 @@
-"""The LLM judge: measuring it, not trusting it.
+"""Measures agreement between the LLM judge and human review verdicts.
 
-**What the judge is, and where it lives.** The judge itself is *not in this
-file*. It is a Langfuse-configured evaluator, set up in the Langfuse UI, that
-runs on traces tagged ``grounded`` and emits a score called
-``judge_clause_supports_conclusion``. It answers the one question the code
-scorers structurally cannot: the agent quoted a real clause, verbatim, about
-roughly the right subject - but does that clause actually support the
-conclusion drawn from it?
-
-**Its configuration is documented verbatim in `docs/judge-configuration.md`,
-and that is not bureaucracy.** It is config, not code: it cannot be reviewed
-in a pull request, cannot be unit-tested, and disappears entirely if this
-project is recreated in a fresh Langfuse workspace. A component that shapes
-production decisions and exists only as settings in a vendor UI is the single
-most fragile thing in this system, and writing it down is the only mitigation
-available.
-
-**What this module owns is agreement, not judgement.** The judge produces
-scores; humans produce verdicts in the annotation queue. This module measures
-how often they say the same thing, and reports the two directions of
+The judge itself is a Langfuse-configured evaluator that runs on traces
+tagged ``grounded`` and emits a score called
+``judge_clause_supports_conclusion``. This module pairs that score with the
+human verdict on the same trace and reports the two directions of
 disagreement separately:
 
-- ``judge_false_flag`` - the judge said a decision was unsupported; the human
-  said it was fine. Annoying. It costs a person a few minutes of review.
-- ``judge_false_pass`` - the judge said a decision was fine; the human said it
-  was wrong. **This is the number that matters.** A judge that over-flags
-  wastes attention; a judge that under-flags is the thing standing between a
-  bad decision and a reader, not doing its job.
+- ``judge_false_flag`` — the judge flagged a decision the human said was fine.
+- ``judge_false_pass`` — the judge passed a decision the human said was wrong.
 
-Reporting a single "agreement: 0.86" would average those together and hide
-exactly the asymmetry that decides whether the judge is trustworthy.
-
-**Why agreement is computed in the nightly and not inline.** Human labels
-arrive days after the judge scores they are about - someone has to open the
-queue. Computing agreement at decision time would measure an empty set and
-report a confident 1.000 about nothing.
-
-**The surviving rule: a judge may never decide an outcome, nor be the only
-thing between a decision and a reader.** Nothing in this module writes a
-decision, and the judge's score never routes anything. It flags for human
-attention, and its own accuracy at doing that is what is measured here.
+The judge never decides an outcome; it only flags for human attention.
 """
 
 from __future__ import annotations
@@ -52,13 +22,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DOCS_DIR = REPO_ROOT / "docs" / "evals"
+REPORTS_DIR = REPO_ROOT / "var" / "evals"
 
 JUDGE_SCORE_NAME = "judge_clause_supports_conclusion"
 
-# Below this many paired observations, no agreement figure is published. Same
-# reasoning as drift.py's MIN_WINDOW: a rate over four labels is not a
-# measurement, and publishing one invites a decision to be made on it.
+# Below this many paired observations, no agreement figure is published.
 MIN_PAIRS = 5
 
 
@@ -77,17 +45,10 @@ class Agreement:
 
     @property
     def false_pass_rate(self) -> float:
-        """Of the decisions a human called wrong, how many the judge passed.
-
-        The denominator is human-wrong cases, not all cases: a judge that
-        never flags anything on a healthy population scores well on overall
-        agreement and terribly here, which is the correct reading of it.
-        """
+        """Of the decisions a human called wrong, how many the judge passed."""
         wrong = self.judge_false_pass + (self.agreed_on_wrong)
         return self.judge_false_pass / wrong if wrong else 0.0
 
-    # Set by compute_agreement; kept as a plain attribute rather than derived
-    # because it needs the pairing that produced the counts.
     agreed_on_wrong: int = 0
 
 
@@ -114,10 +75,7 @@ def compute_agreement(pairs: list[tuple[bool, bool]]) -> Agreement:
 def fetch_pairs() -> list[tuple[bool, bool]]:
     """Pairs a human verdict with the judge's score on the same trace.
 
-    Returns [] when either side is unavailable - no keys, no completed
-    annotations, or no judge configured. An empty list produces no report,
-    which is the honest outcome: "the judge has not been measured" must not
-    render as "the judge agrees".
+    Returns [] when either side is unavailable.
     """
     from tilsynsagent.obs.annotation import CORRECT_VERDICT_VALUE, fetch_completed
     from tilsynsagent.obs.langfuse_setup import observability_enabled
@@ -145,10 +103,6 @@ def fetch_pairs() -> list[tuple[bool, bool]]:
         human_wrong = str(verdict).lower() != "correct" and verdict != CORRECT_VERDICT_VALUE
         judge_flagged = _judge_flagged(client, item["trace_id"])
         if judge_flagged is None:
-            # The judge did not score this trace at all. Excluded rather than
-            # counted as a pass: an unscored trace is missing evidence, and
-            # treating missing evidence as agreement is how a judge comes to
-            # look better than it is.
             continue
         pairs.append((judge_flagged, human_wrong))
     return pairs
@@ -173,9 +127,8 @@ def render_report(agreement: Agreement, *, on: date) -> str:
     return f"""\
 # Judge agreement — {on.isoformat()}
 
-How often the LLM judge (`{JUDGE_SCORE_NAME}`, configured in Langfuse — see
-`docs/judge-configuration.md`) agreed with the person who reviewed the same
-decision.
+How often the LLM judge (`{JUDGE_SCORE_NAME}`, configured in Langfuse) agreed
+with the person who reviewed the same decision.
 
 | | |
 |---|---|
@@ -210,12 +163,8 @@ the only thing that distinguishes using one from believing one.
 
 
 def write_agreement_report(*, on: date | None = None, directory: Path | None = None) -> Path | None:
-    """Computes agreement and commits it to docs/. Returns the path, or None.
-
-    Returns None when there are too few pairs to say anything - which is a
-    normal state for a system whose queue nobody has opened this week, and is
-    reported as silence rather than as a figure.
-    """
+    """Computes agreement and writes a report. Returns the path, or None if
+    there are too few paired observations to publish a figure."""
     on = on or date.today()
     pairs = fetch_pairs()
     if len(pairs) < MIN_PAIRS:
@@ -227,7 +176,7 @@ def write_agreement_report(*, on: date | None = None, directory: Path | None = N
         return None
 
     agreement = compute_agreement(pairs)
-    directory = directory or DOCS_DIR
+    directory = directory or REPORTS_DIR
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"judge-agreement-{on.isoformat()}.md"
     path.write_text(render_report(agreement, on=on))

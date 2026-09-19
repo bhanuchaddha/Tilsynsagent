@@ -127,17 +127,13 @@ def test_valid_structured_output_fails_with_error():
     assert valid_structured_output(CASE, None, error="schema validation failed").value == 0.0
 
 
-# --- regression: the 2026-08-29 baseline's scorer boundary gap -----------
+# --- regression: a scorer boundary gap -----------
 
 
 def test_no_invented_numbers_allows_a_digit_inside_a_sub_area_label():
-    """ZL-025 and ZL-027 failed this scorer in all three stability passes of
-    the 2026-08-29 baseline, and the baseline itself judged it a scorer gap
-    rather than a model fabrication: both sub-areas are named "Delområde 2" /
-    "Delområde 3", and _context_numbers only allowed a bare numeric sub-area
-    code (e.g. "3B"). Naming the sub-area you were handed is faithful
-    citation. See docs/evals/baseline-2026-08-29.md, "a stable, narrower
-    finding"."""
+    """Both sub-areas are named "Delområde 2" / "Delområde 3", and
+    _context_numbers only allowed a bare numeric sub-area code (e.g. "3B").
+    Naming the sub-area you were handed is faithful citation."""
     case = {
         "source": {
             "document": "https://dokument.plandata.dk/20_1234_abc.pdf",

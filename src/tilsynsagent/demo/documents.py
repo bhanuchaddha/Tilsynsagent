@@ -1,42 +1,12 @@
 """Synthetic plan documents, so the grounding path can be demonstrated on
 demand rather than when the register happens to produce the right change.
 
-**These exist for reproducibility, not for proof.** The claim "it reads real
-plan documents" rests on `tilsynsagent run-once`, which fetches real 30 MB
-PDFs from plandata.dk, and on the corpus probe over all 31 real documents in
-the golden set (docs/evals/corpus-probe-2026-09-05.md). It cannot rest on
-documents this project wrote itself - a system that only works on its own
-fixtures has demonstrated nothing. What these buy is a demo that runs the
-same way at 09:00 on a conference stage as it did the night before.
+They go through the entire real path: written to disk, served over a
+``file://`` doklink, fetched by documents/cache.py, parsed by pypdf, split
+by the same CLAUSE_RE. Nothing is stubbed except the PDF content itself.
 
-They go through the *entire real path*: written to disk, served over a
-``file://`` doklink, fetched by documents/cache.py, parsed by pypdf, split by
-the same CLAUSE_RE. Nothing is stubbed. The only thing that is synthetic is
-the content of the PDF.
-
-**Two templates, and the difference between them is the whole of demo 2.**
-
-- ``standard`` numbers its clauses ``6.3``, which production splits.
-- ``drifted`` numbers them ``6.3.``, prefixed by a bullet and set inside a
-  table cell layout - a shape CLAUSE_RE does not match.
-
-The drifted template was chosen against measured evidence rather than
-invented. The original plan for this demo proposed emitting ``§ 6.3``, on the
-assumption that production only matched a bare ``6.3``. The corpus probe
-found that ``§ 6.3`` is *19% of the real corpus* - six of 31 documents - and
-production was widened to accept it. Demonstrating drift with a shape
-production handles correctly would have demonstrated nothing; worse, it would
-have been a claim contradicted by the project's own recorded evidence, in
-front of an audience.
-
-The drift is also deliberately **partial**. A template that fails 100% of the
-time is a bug demo: everything escalates, and the obvious response is "so fix
-the parser". ``drifted`` renders roughly two clauses in three in the
-unmatched shape, so the grounding rate falls from ~90% to ~35% while the
-offline eval score does not move at all - because the golden dataset holds
-the old template. That gap is the entire argument for online evaluation, and
-it only survives questioning if the drift looks like something a municipality
-would plausibly ship.
+One template, ``standard``, numbers its clauses ``6.3``, the shape a
+municipal plan document actually uses.
 """
 
 from __future__ import annotations
@@ -51,7 +21,7 @@ logger = logging.getLogger("tilsynsagent.demo.documents")
 # touching real documents a run has already paid to fetch.
 DEMO_DOCUMENT_DIRNAME = "demo-documents"
 
-TEMPLATES = ("standard", "drifted")
+TEMPLATES = ("standard",)
 
 # The clauses every demo document contains. Real Danish, and real in
 # substance: each says something the five register fields cannot - a storey
@@ -98,14 +68,6 @@ DEMO_CLAUSES: list[tuple[str, str]] = [
         "bestemmelser, der gælder for områdets bebyggelse og anvendelse.",
     ),
 ]
-
-# Which clauses the drifted template renders in the unmatched shape. Two in
-# three, chosen so the ones covering height and storeys - the fields the demo
-# changes - are the ones that go missing, while 11.1 still splits and some
-# records therefore still ground. See the module docstring on why a partial
-# failure is the demo and a total one is not.
-_DRIFTED_CLAUSE_IDS = frozenset({"1.1", "3.1", "6.2", "6.3", "9.2"})
-
 
 # Explanatory prose surrounding the clauses. Deliberately about the same
 # subjects as the clauses - planning, buildings, heights, zones - so
@@ -185,20 +147,6 @@ def demo_document_dir(base: Path | None = None) -> Path:
     return (base or cache_dir().parent) / DEMO_DOCUMENT_DIRNAME
 
 
-def _heading(clause_id: str, template: str) -> str:
-    """How a clause heading is rendered.
-
-    ``standard`` produces ``6.3 <text>``, which CLAUSE_RE matches at the start
-    of a line. ``drifted`` produces ``• 6.3. <text>`` - a bullet before the
-    number, which defeats the line anchor. Both are shapes a real municipal
-    template could produce; only one is a shape production was measured
-    against.
-    """
-    if template == "drifted" and clause_id in _DRIFTED_CLAUSE_IDS:
-        return f"• {clause_id}."
-    return clause_id
-
-
 def build_document(
     *,
     plan_id: int,
@@ -249,7 +197,7 @@ def build_document(
     story.append(Paragraph("Bestemmelser", heading))
     story.append(Spacer(1, 4 * mm))
     for clause_id, text in DEMO_CLAUSES:
-        story.append(Paragraph(f"{_heading(clause_id, template)} {text}", body))
+        story.append(Paragraph(f"{clause_id} {text}", body))
         story.append(Spacer(1, 3 * mm))
 
     SimpleDocTemplate(str(path), pagesize=A4, title=f"Lokalplan {plan_id}").build(story)

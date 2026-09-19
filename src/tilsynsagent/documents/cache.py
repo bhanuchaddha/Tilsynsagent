@@ -1,29 +1,21 @@
 """Fetching a plan document, with a size ceiling and a content-addressed
 cache.
 
-**The ceiling is enforced on the stream, not on Content-Length.** A header is
-a claim by the server; the bytes are the fact. A lying or absent
-Content-Length is precisely the failure a ceiling exists to protect against,
-so this reads in chunks and aborts the moment the accumulated size crosses
-the limit. The corpus probe (docs/evals/corpus-probe-2026-09-05.md) found one
-real document at 156 MB against a median of 8 MB, so this is not a
-theoretical guard.
+The ceiling is enforced on the stream, not on Content-Length, since a header
+is a claim by the server and the bytes are the fact: this reads in chunks
+and aborts the moment the accumulated size crosses the limit.
 
-**The cache key is sha256(doklink), and there is no invalidation logic.**
-The register's doklink embeds the plan id and a millisecond timestamp
+The cache key is sha256(doklink), with no invalidation logic. The register's
+doklink embeds the plan id and a millisecond timestamp
 (``20_9719017_1606817668820.pdf``), so a revised document arrives under a
-different URL and therefore a different key. Cache invalidation is the
-hardest problem in the field, and this source hands us a way not to have it.
+different URL and therefore a different key.
 
-**Nothing here raises.** Every failure - HTTP status, timeout, oversize,
+Nothing here raises. Every failure - HTTP status, timeout, oversize,
 unreadable cache - comes back as ``FetchResult(error=...)``. The grounding
-node treats any error as "cannot ground", which routes to escalation: a
-person looks at it. An exception would instead fail the whole run for a
-record the agent could have escalated honestly.
+node treats any error as "cannot ground", which routes to escalation.
 
 ``file://`` URLs are accepted so demo/documents.py can put synthetic PDFs on
-the same code path as real ones - the demo must exercise the real fetch,
-extract and split, not a stub of them.
+the same code path as real ones.
 """
 
 from __future__ import annotations

@@ -26,9 +26,10 @@ def _grounding(**over):
         "grounding_id": 1,
         "clause_id": "6.2",
         "clause_quote": "højde end 8,5 m",
-        "retrieved_clause_ids": ["6.2"],
+        "citation_kind": "clause",
         "changed_fields": {"maxbygnhjd": {"before": 8.5, "after": 12.0}},
         "document_page_count": 41,
+        "doklink": "https://dokument.plandata.dk/20_1_1.pdf",
     }
     base.update(over)
     return base
@@ -70,10 +71,41 @@ def test_no_uncovered_cases_is_explained_rather_than_shown_as_zero_percent():
     assert "do not cover" in sentence
 
 
+DOCUMENT = "6.2 Bebyggelse må ikke opføres med en større højde end 8,5 m.\n"
+
+
 def test_a_fabricated_clause_is_flagged():
-    flagged = flagged_grounded_runs([_grounding(clause_id="9.9")])
+    """Needs a document reader, because stage 1 moved this check from the
+    retrieved subset to the full source. The tab supplies a cached one."""
+    flagged = flagged_grounded_runs(
+        [_grounding(clause_id="9.9")], document_text=lambda _link: DOCUMENT
+    )
     assert len(flagged) == 1
-    assert flagged[0]["failing"][0][0] == "clause_id_exists"
+    assert "clause_id_exists" in [f[0] for f in flagged[0]["failing"]]
+
+
+def test_a_non_verbatim_quote_is_flagged_when_a_reader_is_supplied():
+    flagged = flagged_grounded_runs(
+        [_grounding(clause_quote="højde end 8.5 m")], document_text=lambda _link: DOCUMENT
+    )
+    assert "clause_is_verbatim" in [f[0] for f in flagged[0]["failing"]]
+
+
+def test_a_field_citation_is_checked_against_the_record_with_no_reader():
+    """The field path needs no document at all, so the tab checks it fully
+    even on a rerun that fetches nothing."""
+    row = _grounding(
+        citation_kind="field",
+        clause_id="",
+        clause_quote="",
+        field_name="status",
+        field_before="Forslag",
+        field_after="Aflyst",
+        before={"status": "Forslag"},
+        after={"status": "Vedtaget"},
+    )
+    flagged = flagged_grounded_runs([row])
+    assert "field_citation_is_real" in [f[0] for f in flagged[0]["failing"]]
 
 
 def test_a_quote_about_the_wrong_field_is_flagged():
@@ -87,18 +119,40 @@ def test_a_good_grounding_is_not_flagged():
     assert flagged_grounded_runs([_grounding()]) == []
 
 
-def test_retrieved_ids_stored_as_json_text_are_handled():
+def test_a_record_stored_as_json_text_is_handled():
     """psycopg can hand back a JSONB column either way depending on the
     query; the tab must not crash on the string form."""
-    assert flagged_grounded_runs([_grounding(retrieved_clause_ids=json.dumps(["6.2"]))]) == []
+    row = _grounding(
+        citation_kind="field",
+        clause_id="",
+        clause_quote="",
+        field_name="status",
+        field_before="Forslag",
+        field_after="Vedtaget",
+        before=json.dumps({"status": "Forslag"}),
+        after=json.dumps({"status": "Vedtaget"}),
+    )
+    assert flagged_grounded_runs([row]) == []
 
 
-def test_flagging_never_fetches_a_document():
-    """Every tab body runs on every rerun. A per-card document fetch would
-    make the screen unusable - which is why clause_is_verbatim is not among
-    the checks run here."""
-    names = {n for f in flagged_grounded_runs([_grounding(clause_id="9.9")]) for n, _ in f["failing"]}
+def test_flagging_fetches_nothing_without_a_reader():
+    """Every tab body runs on every rerun. The document checks are opt-in
+    through the reader, so a caller that passes none pays for no fetch and
+    the screen stays usable."""
+    row = _grounding(clause_id="9.9")
+    names = {n for f in flagged_grounded_runs([row]) for n, _ in f["failing"]}
     assert "clause_is_verbatim" not in names
+    assert "clause_id_exists" not in names
+
+
+def test_the_reader_is_called_once_per_document_not_once_per_check():
+    """clause_id_exists and clause_is_verbatim both need the same text. The
+    tab memoises per render; this pins that one row costs one read."""
+    calls = []
+    flagged_grounded_runs(
+        [_grounding(clause_id="9.9")], document_text=lambda link: calls.append(link) or DOCUMENT
+    )
+    assert len(calls) == 1
 
 
 def test_alert_summary_counts_demo_and_recurrence_separately():

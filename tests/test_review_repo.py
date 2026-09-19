@@ -2,13 +2,7 @@
 (db/repo.py's list_open_escalations and get_escalation_detail) and the
 resume path (graph.resume_run), against the real Neon database.
 
-These are the read side of Phase 3: repo.insert_escalation_resolution
-already had tests via test_actions_integration.py's permission checks, but
-list_open_escalations and get_escalation_detail are new (PLAN.md: "New read
-queries go in db/repo.py beside the existing ones").
-
-Skipped automatically if DATABASE_URL is not set, same convention as
-test_actions_integration.py.
+Skipped automatically if DATABASE_URL is not set.
 """
 
 from __future__ import annotations

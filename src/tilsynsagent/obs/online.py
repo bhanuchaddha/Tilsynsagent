@@ -304,64 +304,70 @@ def _grounded_scores(result: dict) -> list[OnlineScore]:
     """The grounded scorers, for a run that reached the ground node.
 
     Returns [] for every run that did not - a rule-decided filing has no
-    clause to check and would only add hollow 1.0s to the window, which would
-    dilute exactly the rates drift.py watches.
+    citation to check and would only add hollow 1.0s to the window, which
+    would dilute exactly the rates drift.py watches.
 
-    The clause text the quote is checked against is re-read from the cached
+    The document text the quote is checked against is re-read from the cached
     document rather than carried in graph state: state would make the check
     circular (the model's own claim about what it read, verifying itself),
     and the cache makes the re-read nearly free. A cache miss here means the
     quote cannot be verified, which is reported as a failure rather than
     silently skipped.
+
+    A field-cited decision needs no document at all - it is checked against
+    the record - so the fetch is skipped for one, which also means a
+    field-cited decision stays checkable when the document has since 404'd.
     """
     if "grounded" not in result:
         return []
     from tilsynsagent.obs.grounded import score_grounded_run
 
     grounded = bool(result.get("grounded"))
-    clause_id = result.get("grounded_clause_id") or ""
-    clause_text = ""
-    if grounded and clause_id:
-        clause_text = _clause_text_for(result, clause_id)
+    citation_kind = result.get("grounded_citation_kind") or ""
+    document_text = ""
+    if grounded and citation_kind == "clause":
+        document_text = _document_text_for(result)
 
     return score_grounded_run(
         grounded=grounded,
         outcome=result.get("grounded_outcome") or "",
-        clause_id=clause_id,
+        citation_kind=citation_kind,
+        clause_id=result.get("grounded_clause_id") or "",
         clause_quote=result.get("grounded_clause_quote") or "",
-        clause_text=clause_text,
-        retrieved_clause_ids=result.get("retrieved_clause_ids") or [],
+        field_name=result.get("grounded_field_name") or "",
+        field_before=result.get("grounded_field_before") or "",
+        field_after=result.get("grounded_field_after") or "",
+        document_text=document_text,
+        before=result.get("before") or {},
+        after=result.get("after") or {},
         changed_fields=result.get("changed_fields") or {},
     )
 
 
-def _clause_text_for(result: dict, clause_id: str) -> str:
-    """Re-reads the cited clause out of the document the run was given.
+def _document_text_for(result: dict) -> str:
+    """Re-reads the full text of the document the run was given.
 
     Never raises: a scoring failure must not fail a decision that has already
-    been written. An empty return makes clause_is_verbatim fail, which is the
-    honest answer - "we could not check this" is much closer to a failure
-    than to a pass, and a silent skip would let a whole window of grounded
-    decisions go unverified while the rate still read 1.000.
+    been written. An empty return makes clause_id_exists and
+    clause_is_verbatim fail, which is the honest answer - "we could not check
+    this" is much closer to a failure than to a pass, and a silent skip would
+    let a whole window of grounded decisions go unverified while the rate
+    still read 1.000.
     """
     record = result.get("record") or {}
     doklink = record.get("doklink") if isinstance(record, dict) else None
     if not doklink:
         return ""
     try:
-        from tilsynsagent.documents import extract_text, fetch_document, split_clauses
+        from tilsynsagent.documents import extract_text, fetch_document
 
         fetched = fetch_document(doklink)
         if not fetched.ok:
             return ""
         extracted = extract_text(fetched.content)
-        if not extracted.ok:
-            return ""
-        for clause in split_clauses(extracted.text):
-            if clause.clause_id == clause_id:
-                return clause.text
+        return extracted.text if extracted.ok else ""
     except Exception as exc:  # noqa: BLE001 - see docstring
-        logger.warning("clause text for %s could not be re-read: %s", clause_id, exc)
+        logger.warning("document text could not be re-read for scoring: %s", exc)
     return ""
 
 

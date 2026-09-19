@@ -14,8 +14,8 @@ from typing import Any
 
 # Set by assess()/summarise() after each Groq call, read by graph.py's nodes
 # immediately afterward. A contextvar rather than a return-value change keeps
-# assess()/summarise()'s signatures exactly as they were before Phase 2 -
-# callers that only want the Assessment/Summary need no changes at all.
+# assess()/summarise()'s signatures unchanged for callers that only want the
+# Assessment/Summary.
 _last_usage: contextvars.ContextVar[Usage | None] = contextvars.ContextVar(
     "_last_usage", default=None
 )

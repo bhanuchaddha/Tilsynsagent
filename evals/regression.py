@@ -1,38 +1,10 @@
-"""Comparing one nightly eval run against the previous one.
+"""Compares one nightly eval run against the previous one.
 
-**Why run-over-run and not run-against-threshold.** `evals/gate.py` already
-answers "is this good enough?" against committed thresholds, and that is the
-right question for a pull request. It is the wrong question for a nightly:
-thresholds are set with slack in them (0.96, not 1.000, because temperature=0
-is not determinism on a hosted MoE), so a system can degrade from 1.000 to
-0.97 - a real and worrying change - without the gate noticing anything. The
-nightly's question is different: *did anything change since yesterday?*
-
-**Why `new_case_ids` and `newly_failing_case_ids` are reported separately.**
-Because telling them apart *is* the developer workflow, and no aggregate can:
-
-- A **new case that fails** is the dataset doing its job. Somebody labelled a
-  production run precisely because the agent got it wrong, and the mean score
-  dropping is the expected, correct consequence. Nothing regressed.
-- A **case that used to pass and now fails** is a regression. The dataset did
-  not change; the behaviour did.
-
-A single "0.94 -> 0.86" makes those indistinguishable, and the two demand
-opposite responses. An alert that cannot tell them apart gets muted within a
-fortnight, which is worse than no alert.
-
-**Why a tolerance, and why 0.02.** Same reason the thresholds sit at 0.96:
-the model is a hosted mixture-of-experts and temperature=0 does not make it
-deterministic (see docs/evals/baseline-2026-08-22.md's ZL-018 finding). A
-nightly that fires on single-case run-to-run wobble teaches people to ignore
-it, which costs more than the drift it would have caught.
-
-**Why the baseline has a file fallback.** Langfuse's free tier retains data
-for 30 days. Reading the previous run only from `datasets.get_runs` means the
-comparison silently loses its baseline after a month of quiet - the run
-succeeds, reports no regression, and is comparing against nothing. The
-committed `docs/evals/nightly/*.json` files are not an optimisation; without
-them the nightly stops meaning anything exactly when nobody is watching.
+New cases and newly-failing cases are reported separately: a new case that
+fails is the dataset doing its job, while a case that used to pass and now
+fails is a real regression. The previous run is read from Langfuse first,
+falling back to the committed JSON so the comparison survives Langfuse's
+retention window.
 """
 
 from __future__ import annotations
@@ -45,9 +17,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NIGHTLY_DIR = REPO_ROOT / "docs" / "evals" / "nightly"
+NIGHTLY_DIR = REPO_ROOT / "var" / "evals" / "nightly"
 
-# Run-to-run wobble below this is not a regression - see the module docstring.
 TOLERANCE = 0.02
 
 
@@ -101,10 +72,7 @@ def summarise_run(payload: dict, *, name: str) -> RunSummary:
     case_passed = {}
     for record in pass_.get("records", []):
         scores = record.get("scores") or {}
-        # A case with no scores at all (a rule-decided escalation, which calls
-        # no model) counts as passing: it has no LLM behaviour to regress, and
-        # counting it as a failure would make the mean move whenever the mix
-        # of routes in the dataset changes.
+        # A rule-decided case with no model call has no scores; count as passing.
         case_passed[record["case_id"]] = all(v >= 1.0 for v in scores.values()) if scores else True
 
     means = list(per_scorer.values())
@@ -157,9 +125,6 @@ def compare_runs(
     newly_failing = sorted(
         cid
         for cid, passed in current.case_passed.items()
-        # Only cases present in BOTH runs can "newly fail" - a case that did
-        # not exist yesterday cannot have regressed, however badly it scores.
-        # This is the line the whole module is about.
         if not passed and previous.case_passed.get(cid) is True
     )
 
@@ -215,12 +180,7 @@ def load_previous_nightly(
 
 
 def previous_run_from_langfuse(*, dataset_name: str = "tilsynsagent-golden") -> RunSummary | None:
-    """The previous dataset run, read from Langfuse.
-
-    Tried first because it carries runs this checkout may never have seen -
-    another machine's nightly, or a manual experiment. Falls back to the
-    committed JSON, which is what survives the 30-day retention window.
-    """
+    """The previous dataset run, read from Langfuse."""
     from tilsynsagent.obs.langfuse_setup import observability_enabled
 
     if not observability_enabled():
@@ -252,12 +212,7 @@ def _mean_of(run) -> float:
 
 
 def _per_scorer_of(run) -> dict[str, float]:
-    """Per-scorer means off a Langfuse dataset run object.
-
-    Defensive about shape: this is the one place the nightly depends on a
-    vendor response layout, and a shape change must degrade to "no baseline"
-    rather than crash the run that carries the actual finding.
-    """
+    """Per-scorer means off a Langfuse dataset run object."""
     scores = getattr(run, "scores", None) or {}
     result = {}
     if isinstance(scores, dict):

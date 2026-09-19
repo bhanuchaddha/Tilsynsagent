@@ -164,11 +164,31 @@ def test_every_threshold_has_a_scorer_that_can_produce_it():
         for s in score_grounded_run(
             grounded=True,
             outcome="file",
+            citation_kind="clause",
             clause_id="6.3",
             clause_quote="q",
-            clause_text="6.3 q",
-            retrieved_clause_ids=["6.3"],
+            document_text="6.3 q",
             changed_fields={"maxetager": {}},
+        )
+    }
+    # The field-citation scorer runs on the other citation kind, so it needs
+    # its own call - a threshold whose scorer never runs is a check that
+    # silently does nothing, which is exactly what this test exists to catch.
+    grounded |= {
+        s.name
+        for s in score_grounded_run(
+            grounded=True,
+            outcome="file",
+            citation_kind="field",
+            clause_id="",
+            clause_quote="",
+            field_name="status",
+            field_before="F",
+            field_after="V",
+            document_text="",
+            before={"status": "F"},
+            after={"status": "V"},
+            changed_fields={},
         )
     }
     assert set(DEGRADED) == ungrounded | grounded

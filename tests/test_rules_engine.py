@@ -1,8 +1,8 @@
 """Unit tests per rule, plus the full golden-dataset correctness check.
 
-The golden-dataset test is verification 3 from the Phase 1 plan: all 34 cases
-through rules/engine.py, confirming it reproduces the labels. Not the Phase 2
-eval - a correctness check on deterministic code, so it must be 100%.
+The golden-dataset test runs every case through rules/engine.py, confirming
+it reproduces the labels. A correctness check on deterministic code, so it
+must be 100%.
 """
 
 import json
@@ -43,7 +43,7 @@ def test_golden_dataset(case):
 
 
 def test_golden_dataset_is_100_percent():
-    """The Phase 1 plan requires this exact number, not just per-case passes."""
+    """Requires this exact number, not just per-case passes."""
     mismatches = []
     for case in GOLDEN_CASES:
         decision = apply_rules(case["changed_fields"], case["before"], case["after"])

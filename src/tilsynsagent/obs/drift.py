@@ -90,6 +90,15 @@ DEGRADED: dict[str, float] = {
     # a case and acted anyway has leaked past the one code path that leads to
     # a person. There is no acceptable rate for that other than 1.0.
     "abstained_when_ungrounded": 1.0,
+
+    # The field-citation counterpart to clause_id_exists, added with stage 1's
+    # second kind of citation, and 1.0 for the same reason: a decision resting
+    # on "status: F -> V" when the record says no such thing is a fabrication,
+    # not a quality gradient. Code compares it against the stored record, so
+    # there is nothing here to be lossy about - unlike clause_is_verbatim,
+    # which tolerates PDF extraction noise. Written before the first
+    # field-cited decision ever executed, which is this module's discipline.
+    "field_citation_is_real": 1.0,
 }
 
 

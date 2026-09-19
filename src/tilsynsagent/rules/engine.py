@@ -1,16 +1,15 @@
-"""The rule engine: R1-R4 from docs/rules.md, as deterministic code.
+"""The rule engine: R1-R4 from the rule set, as deterministic code.
 
 The rules run in code, not in the model. R1-R4 are field comparisons with a
-fixed precedence; an LLM re-deriving them probabilistically would add cost and
-latency and produce a disagreement class that is almost always "the model was
-wrong". The model's job starts where this engine returns NOT_COVERED.
+fixed precedence; the model's job starts where this engine returns
+NOT_COVERED.
 
-Every outcome names the rule that produced it, so a filed decision can always
-be traced to the rule that justified it. There are only two outcomes a rule can
-reach: FILE or ESCALATE. `ignore` is not reachable deterministically - it is
-always a claim about a document this engine never opens (see docs/rules.md,
-"The two outcomes"); NOT_COVERED hands that claim to assess() instead of
-asserting it from the register alone.
+Every outcome names the rule that produced it, so a filed decision can
+always be traced to the rule that justified it. There are only two outcomes
+a rule can reach: FILE or ESCALATE. `ignore` is not reachable
+deterministically, since it is always a claim about a document this engine
+never opens; NOT_COVERED hands that claim to assess() instead of asserting
+it from the register alone.
 """
 
 from __future__ import annotations
@@ -126,7 +125,7 @@ def _direction(before: object, after: object) -> str:
 
 
 def apply_rules(changed_fields: dict, before: dict, after: dict) -> Decision:
-    """Apply R1-R4 in the precedence order given in docs/rules.md.
+    """Apply R1-R4 in the rule set's precedence order.
 
     ``changed_fields`` maps a watched field to ``{"before": x, "after": y}``,
     the same shape the golden dataset uses, so eval cases and live changes are

@@ -5,33 +5,22 @@ answer. Launched by `tilsynsagent review` (cli.py), which shells out to
 Streamlit re-runs this whole script top-to-bottom on every interaction, so
 anything that must happen exactly once per click (resuming a paused run,
 writing a resolution) is guarded by a form submit rather than by a plain
-button, and the underlying writes are already idempotent regardless
-(db/repo.py's insert_escalation_resolution is UNIQUE on escalation_id and
-raises rather than double-writing; graph.resume_run's Command(resume=...)
-against an already-completed thread is a LangGraph no-op - see graph.py's
-_escalate_node docstring on re-entry).
+button. The underlying writes are also idempotent regardless
+(db/repo.py's insert_escalation_resolution is UNIQUE on escalation_id;
+graph.resume_run's Command(resume=...) against an already-completed thread
+is a LangGraph no-op).
 
-Plain and ugly on purpose (docs/PLAN.md Phase 3): three views (queue, one
-escalation, after-answer confirmation), no styling beyond Streamlit's
-defaults.
+Three views: queue, one escalation, after-answer confirmation.
 
-**Why this app exists at all when Langfuse does.** The dividing line is
-worth stating, because it is the first thing anyone asks:
+Langfuse owns traces, scores, annotation queues, prompt versions, and
+dataset runs. This app owns operational state Langfuse has no concept of:
+the review queue of paused runs, the watermark, open escalations, the
+grounding rate, and the alert files. The Business tab deep-links out to
+Langfuse rather than reimplementing it.
 
-    Langfuse owns what a business person touches - traces, scores,
-    annotation queues, prompt versions, dataset runs. This app owns this
-    system's *operational state*, which Langfuse has no concept of: the
-    review queue of paused runs, the watermark, open escalations, the
-    grounding rate, and the alert files in docs/alerts/.
-
-Rebuilding annotation in here would be rebuilding a product; putting a
-watermark in Langfuse is not possible. The Business tab therefore deep-links
-*out* to Langfuse rather than reimplementing it.
-
-Two Streamlit facts constrain everything added here: every tab body executes
-on every rerun whether visible or not (so queries stay narrow), and nothing
-`st.*`-shaped is testable in this repo (so real logic lives in
-`review/repo.py`).
+Every tab body executes on every rerun whether visible or not, so queries
+stay narrow. Nothing `st.*`-shaped is testable, so real logic lives in
+`review/repo.py`.
 """
 
 from __future__ import annotations
@@ -77,10 +66,8 @@ def _next_case_id() -> str:
 
 def _append_to_golden_dataset(detail: dict, label: str, reason: str) -> str:
     """Appends one escalation-derived case to evals/golden/cases.jsonl, in
-    the exact shape evals/cases.py and the scorers already read (see
-    evals/golden/README.md's "What a case records"). Manual, one click at a
-    time - see PLAN.md Phase 3, "The answer goes into the dataset -
-    manually," on why this is never automatic."""
+    the exact shape evals/cases.py and the scorers read. Manual, one click
+    at a time."""
     case_id = _next_case_id()
     # The rule that *escalated* is recorded under escalated_rule, never under
     # "rule". "rule" means "the rule that produced this label", and the label
@@ -261,15 +248,9 @@ def _escalation_view(escalation_id: int) -> None:
 def _add_to_dataset_section(detail: dict) -> None:
     st.subheader("Add to dataset")
 
-    # Every resolution label is addable now, including 'ignore'. It was not
-    # always: this section used to refuse an ignore-labelled resolution
-    # because the eval pipeline had no route for it. Grounding gave it one
-    # (evals/cases.py maps an ignore label to the grounded_ignore route), and
-    # the guard was removed rather than left in place - a stale explanation in
-    # a screen a stranger reads is worse than no explanation.
     st.caption(
-        "One click appends this resolution to evals/golden/cases.jsonl, tagged "
-        "escalation-derived. Manual on purpose — see docs/PLAN.md Phase 3."
+        "One click appends this resolution to evals/golden/cases.jsonl, "
+        "tagged escalation-derived."
     )
     added_key = f"added-{detail['escalation_id']}"
     if st.session_state.get(added_key):
@@ -347,16 +328,38 @@ def _status_view() -> None:
             for e in pricing.entries()
         ]
     )
-    st.caption(
-        "The most recent recorded eval pass cost $0.0078 for 27 model calls "
-        "(docs/evals/baseline-2026-09-04.md); the same pass on gpt-oss-20b "
-        "cost $0.0040 (docs/evals/model-experiment-2026-09-04.md)."
-    )
+    st.caption("Cost per model, computed from the pricing table below.")
 
 
 
 def _langfuse_base() -> str | None:
     return os.environ.get("LANGFUSE_BASE_URL")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _document_text(doklink: str) -> str:
+    """The full text of a plan document, memoised for this render.
+
+    A tab body runs on every Streamlit rerun and these are large PDFs, so the
+    read is cached twice: documents/cache.py keeps the bytes on disk
+    content-addressed, and this keeps the extracted text in memory for five
+    minutes.
+
+    Never raises. An empty string makes the clause checks fail rather than
+    silently pass.
+    """
+    if not doklink:
+        return ""
+    try:
+        from tilsynsagent.documents import extract_text, fetch_document
+
+        fetched = fetch_document(doklink)
+        if not fetched.ok:
+            return ""
+        extracted = extract_text(fetched.content)
+        return extracted.text if extracted.ok else ""
+    except Exception:  # noqa: BLE001 - a scoring read must not break the screen
+        return ""
 
 
 def _business_view() -> None:
@@ -376,7 +379,7 @@ def _business_view() -> None:
     with _conn() as conn:
         groundings = repo.recent_groundings(conn, limit=25)
 
-    flagged = ui.flagged_grounded_runs(groundings)
+    flagged = ui.flagged_grounded_runs(groundings, document_text=_document_text)
     queue_url = ui.langfuse_queue_url(_langfuse_base(), os.environ.get("LANGFUSE_QUEUE_URL"))
 
     alerts = [a for a in open_alerts() if "quality-drop" in a["name"]]
@@ -559,14 +562,13 @@ def _developer_view() -> None:
 
     st.subheader("Judge vs. human")
     reports = sorted(
-        (Path(__file__).resolve().parents[3] / "docs" / "evals").glob("judge-agreement-*.md"),
+        (Path(__file__).resolve().parents[3] / "var" / "evals").glob("judge-agreement-*.md"),
         reverse=True,
     )
     if not reports:
         st.caption(
             "Not measured yet. Agreement needs human labels from the annotation queue, "
-            "which arrive days after the judge scores they are about — see "
-            "`docs/judge-configuration.md`."
+            "which arrive days after the judge scores they are about."
         )
     else:
         st.caption(f"Most recent: `{reports[0].name}`")
@@ -610,7 +612,7 @@ def _operator_view() -> None:
         st.success("No alerts on file.")
     else:
         st.write(
-            f"{summary['total']} alert file(s) in `docs/alerts/` — "
+            f"{summary['total']} alert file(s) — "
             f"{summary['real']} real, {summary['demo']} demo, "
             f"{summary['recurring']} with repeat occurrences."
         )

@@ -1,15 +1,3 @@
-# The eval gate: a pull request that lowers a behaviour this suite protects
-# fails here.
-#
-# This calls the real model, deliberately. Recorded fixtures would make the
-# job fast and deterministic and would also make it measure nothing - the
-# failure this gate exists to catch is a prompt or model change altering what
-# the model produces, which a fixture cannot see by definition. See
-# evals/gate.py's docstring.
-#
-# Langfuse is not configured for this job. The gate runs against the prompts
-# pinned in llm/prompts.py, so a CI verdict never depends on a vendor being
-# reachable, and the number CI enforces is text committed in this repo.
 name: evals
 
 on:
@@ -19,9 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Groq's free tier is 8000 TPM org-wide (see evals/tasks.py). Two eval jobs
-  # racing each other exhaust it and produce an inconclusive run, so pushes to
-  # the same ref queue rather than overlap.
+  # Serialize eval runs to avoid exhausting the shared rate limit.
   group: evals-${{ github.ref }}
   cancel-in-progress: true
 
@@ -35,16 +21,11 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      # Excludes the live-LLM tests, which need a key and are covered by the
-      # gate job below. Everything here must pass with no network at all.
       - run: uv run pytest -q --deselect tests/test_llm_live.py
 
   gate:
     name: eval gate (real model calls)
     runs-on: ubuntu-latest
-    # A fork PR has no access to secrets, so the gate cannot run there. It
-    # must not silently "pass" in that case - the merge protection is on this
-    # job's verdict, and a skipped job is not a verdict.
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -59,9 +40,6 @@ jobs:
           GROQ_MODEL: openai/gpt-oss-120b
         run: uv run python -m evals.gate --out gate-result.json
 
-      # Uploaded whether or not the gate passed: a failing run's per-case
-      # records are the first thing anyone reviewing the failure needs, and
-      # re-running to obtain them costs another few minutes of free-tier quota.
       - name: Upload the run's per-case records
         if: always()
         uses: actions/upload-artifact@v4

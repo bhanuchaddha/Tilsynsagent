@@ -1,33 +1,30 @@
-"""The grounding step: reading clauses from the source plan document to
-settle a case the register alone could not.
+"""The grounding step: reading the source plan document, and the whole
+register record, to settle a case the rule set could not.
 
-**This is the first decision the agent makes with no person in the path.**
+This is the first decision the agent makes with no person in the path.
 assess() explains an uncovered case to a human; summarise() writes up a
-decision code already made. This function's output *is* a decision - file or
-ignore, autonomously. That is deliberate and it is the point of the phase: a
-population of decisions nobody reviews is the only population that can
-degrade quietly, and a feedback loop needs something that can degrade.
+decision code already made. This function's output is a decision - file or
+ignore, autonomously.
 
-Because of that, three properties matter more here than anywhere else in the
-codebase:
+Three properties matter here:
 
 1. **Abstention is a first-class answer.** ``can_decide=False`` routes the
-   record to a person, exactly as before grounding existed. The prompt says
-   so explicitly. A grounding step that always decides is not grounding, it
-   is guessing with extra steps.
-2. **The decision is checkable by code, not by trust.** The returned
-   ``clause_id`` must exist in the clauses the model was handed, and
-   ``clause_quote`` must appear verbatim in that clause's text.
-   obs/grounded.py checks both mechanically on every grounded run.
+   record to a person, exactly as before grounding existed.
+2. **The decision is checkable by code, not by trust.** A decided grounding
+   names its source: a clause quoted verbatim out of the document, or a
+   register field named with its before -> after values. obs/grounded.py
+   checks both kinds mechanically on every grounded run.
 3. **It never rescues R1 or R4.** Those escalate before this node is
-   reached. The document cannot say whether the register transposed two
-   numbers (R1), nor why a value was dropped (R4). Grounding widens the
-   not-covered path and nothing else.
+   reached, since the document cannot say whether the register transposed
+   two numbers (R1) or why a value was dropped (R4).
 
-Structurally this mirrors assess.py exactly - same ``record_generation``,
-same ``record_last_prompt``, same strict ``response_format`` - so a reader
-who understands one understands both, and the prompt-version-on-every-trace
-property holds identically.
+The model is given the whole document and the whole record, both versions,
+and must name its source. The five watched fields keep their special status
+in the rule engine, where R1-R4 are written against them; they have no
+special status here, since this node only runs where those rules declined.
+
+Structurally this mirrors assess.py - same ``record_generation``, same
+``record_last_prompt``, same strict ``response_format``.
 """
 
 from __future__ import annotations
@@ -39,7 +36,6 @@ from groq import Groq
 from pydantic import BaseModel, Field
 
 from tilsynsagent import obs
-from tilsynsagent.documents.clauses import Clause, render_clauses
 from tilsynsagent.llm.client import groq_client
 from tilsynsagent.llm.prompts import GROUND_PROMPT_NAME, get_prompt, record_last_prompt
 from tilsynsagent.llm.schema import response_format
@@ -53,40 +49,73 @@ DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 # confused with a decision it made.
 GROUNDED_OUTCOMES = ("file", "ignore")
 
+# The two kinds of source a decision may rest on. A decision cites exactly
+# one: if a clause settles it, quote the clause; otherwise name the field.
+# One citation rather than both keeps is_decided a single readable condition
+# and keeps the audit question singular - "what did this rest on?" has one
+# answer, and the answer is checkable either way.
+CITATION_KINDS = ("clause", "field")
+
 
 class Grounding(BaseModel):
-    """What the model concluded from the clauses it was given.
+    """What the model concluded, and what it rested that conclusion on.
 
-    Every field is required by the strict schema, including on an abstention
-    - the model must still say *why* it could not decide, because that
-    sentence is what a person reads when the record reaches the queue.
-    ``clause_id`` and ``clause_quote`` are empty strings on an abstention,
-    never null: Groq strict mode does not accept a nullable field here, and
-    an empty string is unambiguously "no clause" to every downstream check.
+    Every field is required by the strict schema, including on an abstention.
+    Unused fields are empty strings, never null: Groq strict mode does not
+    accept a nullable field here, and an empty string is unambiguously
+    "not this" to every downstream check.
     """
 
     can_decide: bool = Field(
         description=(
-            "True only if a clause you were given governs the changed field. "
-            "False is the correct answer when it does not."
+            "True only if the document or a register field settles the question. "
+            "False is the correct answer when nothing does."
         )
     )
     outcome: str = Field(
         description="'file' or 'ignore' when can_decide is true; empty string otherwise."
     )
+    citation_kind: str = Field(
+        description=(
+            "'clause' if a clause in the document settles it, 'field' if a register "
+            "field does. Empty when abstaining. Prefer 'clause' when both apply."
+        )
+    )
     clause_id: str = Field(
-        description="The number of the clause relied on, e.g. '6.3'. Empty when abstaining."
+        description=(
+            "The number of the clause relied on, e.g. '6.3'. "
+            "Required when citation_kind is 'clause', empty otherwise."
+        )
     )
     clause_quote: str = Field(
         description=(
             "The sentence from that clause, copied character for character. "
-            "Empty when abstaining."
+            "Required when citation_kind is 'clause', empty otherwise."
+        )
+    )
+    field_name: str = Field(
+        description=(
+            "The register field relied on, e.g. 'status'. "
+            "Required when citation_kind is 'field', empty otherwise."
+        )
+    )
+    field_before: str = Field(
+        description="That field's value in the earlier version. Empty otherwise."
+    )
+    field_after: str = Field(
+        description="That field's value in the later version. Empty otherwise."
+    )
+    findings: str = Field(
+        description=(
+            "ONLY when abstaining: the clauses and fields that bear on this "
+            "change, quoted with their ids, and then why they do not settle it. "
+            "MUST be an empty string whenever can_decide is true."
         )
     )
     reasoning: str = Field(
         description=(
-            "One or two sentences: how the quoted clause settles the question, or, "
-            "when abstaining, what the clauses given do not cover."
+            "One or two sentences: how the cited source settles the question, or, "
+            "when abstaining, what remains undecided after the findings above."
         )
     )
     citation: str = Field(description="URL of the source document (doklink).")
@@ -96,76 +125,131 @@ class Grounding(BaseModel):
         """A decision this system will act on autonomously.
 
         Stricter than ``can_decide`` alone on purpose: a model that sets
-        can_decide=True but returns no clause id, no quote, or an outcome
-        outside GROUNDED_OUTCOMES has not produced something checkable, and
-        an uncheckable autonomous decision is exactly what CLAUDE.md's one
-        rule forbids. Treated as an abstention, which escalates.
+        can_decide=True but returns no usable citation has not produced
+        something checkable, and an uncheckable autonomous decision is
+        exactly what CLAUDE.md's one rule forbids. Treated as an abstention,
+        which escalates.
+
+        Either kind of citation is accepted, and that is load-bearing rather
+        than permissive. Requiring a clause would discard a correct
+        field-based decision as uncheckable - ``status: F -> V`` is a fully
+        traceable source, and refusing it is what kept demo case 2 from
+        working. A named field with at least one side of its transition is
+        checkable against the record by code, which is the bar.
         """
-        return bool(
-            self.can_decide
-            and self.outcome in GROUNDED_OUTCOMES
-            and self.clause_id.strip()
-            and self.clause_quote.strip()
-        )
+        if not (self.can_decide and self.outcome in GROUNDED_OUTCOMES):
+            return False
+        if self.citation_kind == "clause":
+            return bool(self.clause_id.strip() and self.clause_quote.strip())
+        if self.citation_kind == "field":
+            return bool(
+                self.field_name.strip()
+                and (self.field_before.strip() or self.field_after.strip())
+            )
+        return False
+
+    @property
+    def source_description(self) -> str:
+        """One line naming what the decision rested on, for a person reading
+        the filing or the queue. Never empty on a decided grounding."""
+        if self.citation_kind == "clause":
+            return f"clause {self.clause_id}"
+        if self.citation_kind == "field":
+            return f"{self.field_name}: {self.field_before or '(none)'} -> {self.field_after or '(none)'}"
+        return ""
+
+
+def render_record(record: dict) -> str:
+    """One register version as ``field: value`` lines, every field included.
+
+    Sorted so the before and after blocks line up visually for the model and
+    for anyone reading the prompt in a trace. ``None`` renders as ``(none)``
+    rather than being dropped, because a field that has no value is a fact
+    about the record and dropping it would make an absence look like an
+    omission by the harness.
+    """
+    if not record:
+        return "(no version recorded)"
+    return "\n".join(
+        f"  {key}: {'(none)' if record[key] is None else record[key]}"
+        for key in sorted(record)
+    )
 
 
 def build_prompt(
     *,
     sub_area_description: str,
-    changed_fields: dict,
-    clauses: list[Clause],
+    before: dict,
+    after: dict,
+    watched_changed_fields: dict,
+    document_text: str,
     doklink: str,
 ) -> str:
-    """The user message: the change, and the clauses retrieved for it.
+    """The user message: the whole record, both versions, and the whole document.
 
-    The whole document is never sent. Four clauses (~4k chars) is what
-    retrieval selected for the fields that actually changed - see
-    documents/clauses.py. Sending the full 27k-token document would cost
-    ~25x more per record and would let the model answer from a part of the
-    plan nobody asked about, which is unauditable by construction.
+    ``watched_changed_fields`` is passed as context, not as the question. It
+    is what the rule engine already examined, and on the not-covered route it
+    is empty by definition - the model needs to know the rules looked at
+    those five and declined, so the change is somewhere else.
     """
-    clause_text = render_clauses(clauses) or "(no clauses were retrieved for these fields)"
-    clause_ids = ", ".join(c.clause_id for c in clauses) or "none"
+    watched = (
+        ", ".join(sorted(watched_changed_fields))
+        if watched_changed_fields
+        else "none - all five are identical in both versions"
+    )
     return f"""\
 Sub-area: {sub_area_description}
 
-Changed fields in the register (before -> after):
-{changed_fields}
+The five fields the written rule set watches (maxbygnhjd, maxetager,
+bebygpct, zonestatus, anvendelsegenerel) were already examined by the rules,
+which did not settle this case.
+
+Watched fields that differ between the two versions below: {watched}
+
+The register record BEFORE this change, every field:
+{render_record(before)}
+
+The register record AFTER this change, every field:
+{render_record(after)}
 
 Source document: {doklink}
 
-Clauses retrieved from that document for the changed fields (ids: {clause_ids}):
+Full text of that document:
 
-{clause_text}
+{document_text}
 
-Decide whether a reader of this land now sees something they could not see
-before, using only the clauses above. Quote the clause you rely on exactly as
-it is written. If none of these clauses governs the changed field, set
-can_decide to false."""
+Does a reader of this land now see something they could not see before?
+Decide from the document text or from a register field above, and name which
+one you used. If nothing settles it, set can_decide to false and list what
+you did find."""
 
 
 def ground(
     *,
     sub_area_description: str,
-    changed_fields: dict,
-    clauses: list[Clause],
+    before: dict,
+    after: dict,
+    watched_changed_fields: dict,
+    document_text: str,
     doklink: str,
     client: Groq | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Grounding:
-    """Asks the model to settle an uncovered case from the document's clauses.
+    """Asks the model to settle an uncovered case from the document and record.
 
-    Called only when retrieval produced at least one clause; an empty
-    retrieval is an abstention decided in code and never costs a model call
-    (see graph.py's _ground_node).
+    Called only when a document was fetched and text extracted; a document
+    that cannot be read is an abstention decided in code and never costs a
+    model call (see graph.py's _ground_node).
     """
     client = client or groq_client()
     system = get_prompt(GROUND_PROMPT_NAME)
     record_last_prompt(system)
     prompt = build_prompt(
         sub_area_description=sub_area_description,
-        changed_fields=changed_fields,
-        clauses=clauses,
+        before=before,
+        after=after,
+        watched_changed_fields=watched_changed_fields,
+        document_text=document_text,
         doklink=doklink,
     )
     with obs.record_generation("ground", model=model) as gen:
@@ -190,7 +274,7 @@ def ground(
                     "prompt_name": system.name,
                     "prompt_version": system.version,
                     "prompt_source": system.source,
-                    "retrieved_clause_ids": [c.clause_id for c in clauses],
+                    "document_chars": len(document_text),
                 },
                 usage_details={
                     "input": usage.prompt_tokens,
